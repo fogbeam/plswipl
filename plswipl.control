@@ -1,0 +1,8 @@
+# plswipl extension
+comment = 'PL/SWI-Prolog procedural language'
+default_version = '0.1'
+module_pathname = '$libdir/plswipl'
+relocatable = false
+schema = pg_catalog
+superuser = true
+directory = plswipl
