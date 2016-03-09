@@ -1,0 +1,68 @@
+void
+plswipl_dump_info(PG_FUNCITON_ARGS) {
+    FmgrInfo *info;
+    HeapTuple	procTup;
+    Oid fn_oid = fcinfo->flinfo->fn_oid;
+    Form_pg_proc procStruct;
+    HeapTupleHeader tupData;
+
+    printf("flinfo: %p, context: %p, resultinfo: %p, oid: %i, isnull: %i, nargs: %i\n",
+           fcinfo->flinfo,
+           fcinfo->context,
+           fcinfo->resultinfo,
+           fcinfo->fncollation,
+           fcinfo->isnull,
+           fcinfo->nargs);
+
+    info = fcinfo->flinfo;
+    if (info) {
+        printf("fn_addr: %p, oid: %i, nargs: %i, strict: %i, retset: %i, stats: %i, extra: %p\n",
+               info->fn_addr,
+               info->fn_oid,
+               info->fn_nargs,
+               info->fn_strict,
+               info->fn_retset,
+               info->fn_stats,
+               info->fn_extra);
+    }
+
+    procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
+    if (!HeapTupleIsValid(procTup))
+        elog(ERROR, "cache lookup failed for function %u", fn_oid);
+
+    printf("procTup(%p): len: %i, self.blkid: (%i,%i), self.posid: %i, tableOid: %i, data: %p\n",
+           procTup, procTup->t_len, procTup->t_self.ip_blkid.bi_hi, procTup->t_self.ip_blkid.bi_lo,
+           procTup->t_self.ip_posid, procTup->t_tableOid, procTup->t_data);
+
+    tupData = procTup->t_data;
+    printf("tupData(%p): ctid.ip_blkid: (%i, %i), ctid.ip_podid: %i, infomask2: %i, infomask: %i, hoff: %i\n",
+           tupData, tupData->t_ctid.ip_posid, tupData->t_ctid.ip_blkid.bi_hi, tupData->t_ctid.ip_blkid.bi_lo,
+           tupData->t_infomask2, tupData->t_infomask, tupData->t_hoff);
+    
+    procStruct = (Form_pg_proc) GETSTRUCT(procTup);
+
+    printf("procStruct: proname: %s, pronamespace: %i, proowner: %i, prolang: %i, procost: %f, prorows: %f, provariadic: %i, protransform: %i, "
+           "proisagg: %i, proiswindow: %i, prosecdef: %i, proleakproof: %i, proisstrict: %i, proretset: %i, "
+           "provolatile: %i, proparallel: %%i, pronargs: %i, pronargdefauls: %i, prorettype: %i\n",
+           procStruct->proname.data,
+           procStruct->pronamespace,
+           procStruct->proowner,
+           procStruct->prolang,
+           procStruct->procost,
+           procStruct->prorows,
+           procStruct->provariadic,
+           procStruct->protransform,
+           procStruct->proisagg,
+           procStruct->proiswindow,
+           procStruct->prosecdef,
+           procStruct->proleakproof,
+           procStruct->proisstrict,
+           procStruct->proretset,
+           procStruct->provolatile,
+           /* procStruct->proparallel, */
+           procStruct->pronargs,
+           procStruct->pronargdefaults,
+           procStruct->prorettype);
+
+}
+
