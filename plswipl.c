@@ -6,8 +6,10 @@
 #include "port.h"
 #include "utils/elog.h"
 #include "utils/syscache.h"
+#include "utils/builtins.h"
 #include "catalog/pg_proc.h"
 #include "access/htup_details.h"
+#include "catalog/pg_type.h"
 
 #include <SWI-Prolog.h>
 
@@ -51,7 +53,7 @@ _PG_init(void) {
         printf("swi-prolog args:");
         for (p = plswipl_argv; *p; p++) printf(" \"%s\"", *p);
         printf(".\n");
-        
+
         if (PL_initialise(5, plswipl_argv)) {
             inited = 1;
             return;
@@ -64,7 +66,7 @@ _PG_init(void) {
 Datum
 plswipl_handler(PG_FUNCTION_ARGS) {
     Datum retval;
-    
+
     if (CALLED_AS_TRIGGER(fcinfo)) {
         printf("function called as trigger!\n"); fflush(stdout);
         /*
@@ -101,17 +103,17 @@ check_exception(qid_t qid, char *context) {
 Datum
 plswipl_inline(PG_FUNCTION_ARGS) {
     InlineCodeBlock *codeblock = (InlineCodeBlock *) PG_GETARG_POINTER(0);
-    static predicate_t p = 0;
+    static predicate_t predicate_handle_do = 0;
     fid_t fid;
     term_t a0;
 
-    if (!p)
-        p = PL_predicate("do", 1, "plswipl_low");
-    
+    if (!predicate_handle_do)
+        predicate_handle_do = PL_predicate("handle_do", 1, "plswipl_low");
+
     fid = PL_open_foreign_frame();
     a0 = PL_new_term_refs(1);
     if (PL_put_string_chars(a0, codeblock->source_text)) {
-        qid_t qid = PL_open_query(NULL, PL_Q_CATCH_EXCEPTION, p, a0);
+        qid_t qid = PL_open_query(NULL, PL_Q_CATCH_EXCEPTION, predicate_handle_do, a0);
         if (!PL_next_solution(qid))
             check_exception(qid, "while executing DO with PLSWIPL");
         PL_close_query(qid);
@@ -125,72 +127,12 @@ plswipl_validator(PG_FUNCTION_ARGS) {
     PG_RETURN_VOID();
 }
 
-void
-plswipl_dump_info(PG_FUNCITON_ARGS) {
-    FmgrInfo *info;
-    HeapTuple	procTup;
-    Oid fn_oid = fcinfo->flinfo->fn_oid;
-    Form_pg_proc procStruct;
-    HeapTupleHeader tupData;
-    
-    printf("flinfo: %p, context: %p, resultinfo: %p, oid: %i, isnull: %i, nargs: %i\n",
-           fcinfo->flinfo,
-           fcinfo->context,
-           fcinfo->resultinfo,
-           fcinfo->fncollation,
-           fcinfo->isnull,
-           fcinfo->nargs);
-
-    info = fcinfo->flinfo;
-    if (info) {
-        printf("fn_addr: %p, oid: %i, nargs: %i, strict: %i, retset: %i, stats: %i, extra: %p\n",
-               info->fn_addr,
-               info->fn_oid,
-               info->fn_nargs,
-               info->fn_strict,
-               info->fn_retset,
-               info->fn_stats,
-               info->fn_extra);
-    }
-
-    procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
-    if (!HeapTupleIsValid(procTup))
-        elog(ERROR, "cache lookup failed for function %u", fn_oid);
-
-    printf("procTup(%p): len: %i, self.blkid: (%i,%i), self.posid: %i, tableOid: %i, data: %p\n",
-           procTup, procTup->t_len, procTup->t_self.ip_blkid.bi_hi, procTup->t_self.ip_blkid.bi_lo,
-           procTup->t_self.ip_posid, procTup->t_tableOid, procTup->t_data);
-
-    tupData = procTup->t_data;
-    printf("tupData(%p): ctid.ip_blkid: (%i, %i), ctid.ip_podid: %i, infomask2: %i, infomask: %i, hoff: %i\n",
-           tupData, tupData->t_ctid.ip_posid, tupData->t_ctid.ip_blkid.bi_hi, tupData->t_ctid.ip_blkid.bi_lo,
-           tupData->t_infomask2, tupData->t_infomask, tupData->t_hoff);
-    
-    procStruct = (Form_pg_proc) GETSTRUCT(procTup);
-
-    printf("procStruct: proname: %s, pronamespace: %i, proowner: %i, prolang: %i, procost: %f, prorows: %f, provariadic: %i, protransform: %i, "
-           "proisagg: %i, proiswindow: %i, prosecdef: %i, proleakproof: %i, proisstrict: %i, proretset: %i, "
-           "provolatile: %i, proparallel: %%i, pronargs: %i, pronargdefauls: %i, prorettype: %i\n",
-           procStruct->proname.data,
-           procStruct->pronamespace,
-           procStruct->proowner,
-           procStruct->prolang,
-           procStruct->procost,
-           procStruct->prorows,
-           procStruct->provariadic,
-           procStruct->protransform,
-           procStruct->proisagg,
-           procStruct->proiswindow,
-           procStruct->prosecdef,
-           procStruct->proleakproof,
-           procStruct->proisstrict,
-           procStruct->proretset,
-           procStruct->provolatile,
-           /* procStruct->proparallel, */
-           procStruct->pronargs,
-           procStruct->pronargdefaults,
-           procStruct->prorettype);
-
+static int
+cons_functor_chars(term_t out, const char *name, int arity, term_t args) {
+    atom_t atom_name = PL_new_atom(name);
+    int r = PL_cons_functor_v(out, PL_new_functor(atom_name, arity), args);
+    PL_unregister_atom(atom_name);
+    return r;
 }
 
 Datum
@@ -198,18 +140,27 @@ plswipl_function(PG_FUNCTION_ARGS) {
     Oid fn_oid = fcinfo->flinfo->fn_oid;
     HeapTuple procTup;
     Form_pg_proc procStruct;
-    Datum proallargtypes;
-    Datum proargmodes;
+    Datum proallargtypes, proargmodes, prosrcdatum;
+    Oid *argtypes;
+    char *argmodes;
+    char *proSource;
     bool isNull;
-    int numargs, i;
+    int nargs, i;
     fid_t fid;
-    
+    term_t a0, a1;
+    qid_t qid;
+
+    static predicate_t predicate_handle_function = 0;
+    if (!predicate_handle_function)
+        predicate_handle_function = PL_predicate("handle_function", 2, "plswipl_low");
+
     procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
     if (!HeapTupleIsValid(procTup))
         elog(ERROR, "cache lookup failed for function %u", fn_oid);
     procStruct = (Form_pg_proc) GETSTRUCT(procTup);
-    nargs = procStruct->procnargs;
-    
+
+    nargs = procStruct->pronargs;
+
     proallargtypes = SysCacheGetAttr(PROCOID, procTup,  Anum_pg_proc_proallargtypes, &isNull);
     if (isNull) {
         if (procStruct->proargtypes.dim1 != nargs) elog(ERROR, "size mismatch between function arguments and type array");
@@ -217,14 +168,14 @@ plswipl_function(PG_FUNCTION_ARGS) {
     }
     else {
         ArrayType *arr = DatumGetArrayTypeP(proallargtypes);
-        if ((ARG_NDIM(arr) != 1)       ||
+        if ((ARR_NDIM(arr) != 1)       ||
             (ARR_DIMS(arr)[0] < nargs) ||
             ARR_HASNULL(arr)           ||
             (ARR_ELEMTYPE(arr) != OIDOID)) elog(ERROR, "proallargtypes is not a 1-D Oid array");
         nargs = ARR_DIMS(arr)[0];
-        argtypes = ARR_DATA_PTR(arr);
+        argtypes = (Oid*)ARR_DATA_PTR(arr);
     }
-    
+
     proargmodes = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_proargmodes, &isNull);
     if (isNull)
         argmodes = NULL;
@@ -234,73 +185,73 @@ plswipl_function(PG_FUNCTION_ARGS) {
             (ARR_DIMS(arr)[0] != nargs) ||
             ARR_HASNULL(arr)            ||
             (ARR_ELEMTYPE(arr) != CHAROID)) elog(ERROR, "proargmodes is not a 1-D char array");
-        argmodes = ARR_DATA_PTR(arr);
+        argmodes = (char*)ARR_DATA_PTR(arr);
     }
 
     fid = PL_open_foreign_frame();
-    a0 = PL_new_term_refs(nargs);
-    
+    a0 = PL_new_term_refs(nargs + 1);
+
     for (i = 0; i < nargs; i++) {
-        if (!argmodes || (argmodes[i] == 'i')) {
-            HeapTuple argTypeTup;
-            Form_pg_type argTypeStruct;
-            Datum *datum = fcinfo->arg + i;
-            argTypeTup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(argtypes[i]));
-            if (!HeapTupleIsValid(argTypeTup))
-                elog(ERROR, "cache lookup failed for type %u", argtypes[i]);
-            argTypeStruct = (Form_pg_type) GETSTRUCT(argTypeTup);
-            switch (argTypeStruct->typtype) {
-            case TYPTYPE_PSEUDO:
-            case TYPTYPE_COMPOSITE:
-                /* Disallow pseudotype and composite arguments */
+        char argmode = (argmodes ? argmodes[i] : 'i');
+        term_t a = a0 + i;
+        Datum *datum = fcinfo->arg + i;
+        switch (argmode) {
+        case 'i':
+            switch(argtypes[i]) {
+            case BOOLOID:
+                PL_put_bool(a, DatumGetBool(*datum));
+                break;
+            case INT2OID:
+                PL_put_integer(a, DatumGetInt16(*datum));
+                break;
+            case INT4OID:
+                PL_put_integer(a, DatumGetInt32(*datum));
+                break;
+            case INT8OID:
+                PL_put_int64(a, DatumGetInt64(*datum));
+                break;
+            default:
                 PL_discard_foreign_frame(fid);
                 ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("PL/SWI-Prolog functions cannot accept type %s",
-                                format_type_be(types[i]))));
-                break;
-            default:
-                switch(typeOid) {
-                case BOOLOID:
-                case INT2OID:
-                    PL_put_integer(a0, i, DatumGetInt16(*datum));
-                    break;
-                case INT4OID:
-                    PL_put_integer(a0, i, DatumGetIn32(*datum));
-                    break;
-                case INT8OID:
-                    PL_put_integer(a0, i, DatumGetIn64(*datum));
-                    break;
-                }
+                                format_type_be(argtypes[i]))));
             }
+        case 'o':
+            /* output: do nothing yet! */
+            break;
+        default:
+            PL_discard_foreign_frame(fid);
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("PL/SWI-Prolog functions cannot accept argument mode '%c'",
+                            argmode)));
         }
-
-// WORKING HERE!!!
-        
-    proallarg
-    if  (procStruct->pronargs) {
-        Oid *types;
-        char **names, *modes;
-        int pos, total;
-
-        
-        
-        total = get_func_arg_info(procTup, &types, &names, &modes);
-
-
-
-        
-        nargs = procStruct->pronargs;
-        prosrcdatum = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isnull);
-        if (isnull)
-            elog(ERROR, "null prosrc");
-        procSource = TextDatumGetCString(prosrcdatum);
-        fid = PL_open_foreign_frame();
-        if (!p)
-            p = PL_predicate("handle", 7, "plswipl_low")
     }
 
-    
-    fflush(stdout);
+    a1 = PL_new_term_refs(2);
+    if (!cons_functor_chars(a1 + 0, procStruct->proname.data, nargs + 1, a0)) {
+        PL_discard_foreign_frame(fid);
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("PL/SWI-Prolog PL_cons_functor_v failed")));
+    }
+
+    prosrcdatum = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isNull);
+    if (isNull)
+        elog(ERROR, "null prosrc");
+    proSource = TextDatumGetCString(prosrcdatum);
+    PL_put_string_chars(a1 + 1, proSource);
+    pfree(proSource);
+
+    qid = PL_open_query(NULL, PL_Q_CATCH_EXCEPTION, predicate_handle_function, a1);
+    if (!PL_next_solution(qid))
+        check_exception(qid, "while callin PLSWIPL function");
+    PL_close_query(qid);
+    PL_discard_foreign_frame(fid);
+    ereport(ERROR,
+            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+             errmsg("PL/SWI-Prolog everything was right until now!")));
     PG_RETURN_VOID();
 }
+
