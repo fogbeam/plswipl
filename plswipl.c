@@ -206,13 +206,14 @@ plswipl_function(PG_FUNCTION_ARGS) {
     if (!predicate_handle_function)
         predicate_handle_function = PL_predicate("handle_function", 2, "plswipl_low");
 
-    printf("fcinfo: %p, context: %p, resultinfo: %p, fncollation: %i, isnull: %d, nargs: %d\n",
-           fcinfo, fcinfo->context, rsi, fcinfo->fncollation, fcinfo->isnull, fcinfo->nargs);
+    printf("fcinfo: %p, context: %p, resultinfo: %p, fncollation: %i, isnull: %d, nargs: %d, first: %d\n",
+           fcinfo, fcinfo->context, rsi, fcinfo->fncollation, fcinfo->isnull, fcinfo->nargs, first);
     if (rsi)
         printf("ReturnSetInfo: %p, type: %i, econtext: %p, expectedDesc: %p, allowedModes: %i, "
                "returnMode: %i, isDone: %i, setResult: %p, setDesc: %p\n",
                rsi, rsi->type, rsi->econtext, rsi->expectedDesc, rsi->allowedModes,
                rsi->returnMode, rsi->isDone, rsi->setResult, rsi->setDesc);
+    fflush(stdout);
     
     procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
     if (!HeapTupleIsValid(procTup))
@@ -250,7 +251,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
     }
 
     /* first = (!procStruct->proretset || rsi || (rsi->isDone == ExprSingleResult)); */
-    
+
     if (first) {
     
         fid = PL_open_foreign_frame();
