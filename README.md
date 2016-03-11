@@ -28,7 +28,8 @@ From `psql` shell as superuser:
 
     create extension plswipl;
     CREATE EXTENSION
-    salva=# create or replace function break_chars(text) returns setof text as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language PLSWIPL;
+    salva=# create or replace function break_chars(text) returns setof text
+                as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language PLSWIPL;
     CREATE FUNCTION
     salva=# select break_chars('all the letters');
      break_chars
