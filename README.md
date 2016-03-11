@@ -65,7 +65,7 @@ From `psql` shell as superuser:
 
 - Add support for doing FDW in Prolog?
 
-- Store prolog modules inside the database.
+- Store Prolog modules inside the database.
 
 - Add trusted version for non superusers.
 
