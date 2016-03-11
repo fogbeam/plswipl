@@ -16,7 +16,7 @@ Note that PostgreSQL development utilities and header files are required.
 
 ## Example
 
-See the [example.prolog] file which contains the following predicate definition:
+See the [example.prolog](./example.prolog) file which contains the following predicate definition:
 
 ```prolog
 break_chars(String, Char) :-
