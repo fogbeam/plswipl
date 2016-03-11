@@ -5,7 +5,7 @@ inside [PostgreSQL](http://www.postgresql.org/)!
 
 ## Status
 
-This is still a work in progress. Quering prolog barely works!
+This is still a work in progress. It just barely works!
 
 ## Installation
 
@@ -70,6 +70,8 @@ From `psql` shell as superuser:
 
 - Learn how a procedural language interactuates with having more than
   one schema or changing the session user.
+
+- Fix this alarm exceptions thing.
 
 ## Focus
 
