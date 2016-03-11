@@ -74,6 +74,11 @@ From `psql` shell as superuser:
 
 - Fix this alarm exceptions thing.
 
+- Investigate higher level approaches to Prolog/SQL interaction.
+
+- Investigate how to use Prolog to provided a Datalog (or similar)
+  interface to Pg.
+
 ## Focus
 
 My aim is getting PL/SWI-Prolog to be a correct, flexible
@@ -82,6 +87,10 @@ and powerful Procedural Language backend.
 At this point, structured, flexible and clear is the most important
 thing. Optimizations making the code more complex are not welcomed
 yet!
+
+## Collaborating
+
+Collaborations welcome! Just fork the project and start submiting pull requests!
 
 ## License
 
