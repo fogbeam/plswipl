@@ -10,6 +10,7 @@
 #include "catalog/pg_proc.h"
 #include "access/htup_details.h"
 #include "catalog/pg_type.h"
+#include "mb/pg_wchar.h"
 
 #include <SWI-Prolog.h>
 
@@ -61,7 +62,6 @@ _PG_init(void) {
         PL_halt(1);
     }
 }
-
 
 Datum
 plswipl_handler(PG_FUNCTION_ARGS) {
@@ -135,30 +135,91 @@ cons_functor_chars(term_t out, const char *name, int arity, term_t args) {
     return r;
 }
 
+static char *
+utf_e2u(const char *str) {
+    printf("database encoding: %d [ascii: %d]\n", GetDatabaseEncoding(),PG_SQL_ASCII); fflush(stdout); 
+    return pg_server_to_any(str, strlen(str), PG_UTF8);
+}
+
+static bool
+plswipl_term_to_datum(term_t t, Oid type, Datum *datum) {
+    switch(type) {
+    case VOIDOID:
+        *datum = (Datum)0;
+        break;
+    case BOOLOID: {
+        int v;
+        if (!PL_get_bool(t, &v)) return FALSE;
+        *datum = BoolGetDatum(v);
+        break;
+    }
+    case INT2OID:
+    case INT4OID:
+    case INT8OID: {
+        int64_t v;
+        if (!PL_get_int64(t, &v)) return FALSE;
+        if (type == INT2OID) {
+            if ((uint64_t)v >> 16) return FALSE;
+            *datum = Int16GetDatum(v);
+        }
+        else if (type == INT4OID) {
+            if ((uint64_t)v >> 32) return FALSE;
+            *datum = Int32GetDatum(v);
+        }
+        else { /* INT8OID */                    
+            *datum = Int64GetDatum(v);
+        }
+        break;
+    }
+    case TEXTOID: {
+        char *v;
+        if (!PL_get_chars(t, &v, CVT_ALL|BUF_RING|REP_UTF8)) return FALSE;
+        *datum = PointerGetDatum(DirectFunctionCall1(textin, PointerGetDatum(v)));
+        break;
+    }
+    default:
+        return FALSE;
+    }
+    return TRUE;
+}
+
 Datum
 plswipl_function(PG_FUNCTION_ARGS) {
     Oid fn_oid = fcinfo->flinfo->fn_oid;
+    ReturnSetInfo *rsi = (ReturnSetInfo *)fcinfo->resultinfo;
     HeapTuple procTup;
     Form_pg_proc procStruct;
     Datum proallargtypes, proargmodes, prosrcdatum;
-    Oid *argtypes;
+    Oid *argtypes, rettype;
     char *argmodes;
     char *proSource;
-    bool isNull;
+    bool isNull, retvoid, ok;
     int nargs, i;
-    fid_t fid;
-    term_t a0, a1;
-    qid_t qid;
+    static fid_t fid;
+    static term_t a0, a1;
+    static qid_t qid;
+    static bool first = 1;
+    Datum out;
+
 
     static predicate_t predicate_handle_function = 0;
     if (!predicate_handle_function)
         predicate_handle_function = PL_predicate("handle_function", 2, "plswipl_low");
 
+    printf("fcinfo: %p, context: %p, resultinfo: %p, fncollation: %i, isnull: %d, nargs: %d\n",
+           fcinfo, fcinfo->context, rsi, fcinfo->fncollation, fcinfo->isnull, fcinfo->nargs);
+    if (rsi)
+        printf("ReturnSetInfo: %p, type: %i, econtext: %p, expectedDesc: %p, allowedModes: %i, "
+               "returnMode: %i, isDone: %i, setResult: %p, setDesc: %p\n",
+               rsi, rsi->type, rsi->econtext, rsi->expectedDesc, rsi->allowedModes,
+               rsi->returnMode, rsi->isDone, rsi->setResult, rsi->setDesc);
+    
     procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
     if (!HeapTupleIsValid(procTup))
         elog(ERROR, "cache lookup failed for function %u", fn_oid);
     procStruct = (Form_pg_proc) GETSTRUCT(procTup);
-
+    rettype = procStruct->prorettype;
+    retvoid = (rettype == VOIDOID);
     nargs = procStruct->pronargs;
 
     proallargtypes = SysCacheGetAttr(PROCOID, procTup,  Anum_pg_proc_proallargtypes, &isNull);
@@ -188,70 +249,141 @@ plswipl_function(PG_FUNCTION_ARGS) {
         argmodes = (char*)ARR_DATA_PTR(arr);
     }
 
-    fid = PL_open_foreign_frame();
-    a0 = PL_new_term_refs(nargs + 1);
+    /* first = (!procStruct->proretset || rsi || (rsi->isDone == ExprSingleResult)); */
+    
+    if (first) {
+    
+        fid = PL_open_foreign_frame();
+        a0 = PL_new_term_refs(nargs + 1);
 
-    for (i = 0; i < nargs; i++) {
-        char argmode = (argmodes ? argmodes[i] : 'i');
-        term_t a = a0 + i;
-        Datum *datum = fcinfo->arg + i;
-        switch (argmode) {
-        case 'i':
-            switch(argtypes[i]) {
-            case BOOLOID:
-                PL_put_bool(a, DatumGetBool(*datum));
-                break;
-            case INT2OID:
-                PL_put_integer(a, DatumGetInt16(*datum));
-                break;
-            case INT4OID:
-                PL_put_integer(a, DatumGetInt32(*datum));
-                break;
-            case INT8OID:
-                PL_put_int64(a, DatumGetInt64(*datum));
+        for (i = 0; i < nargs; i++) {
+            char argmode = (argmodes ? argmodes[i] : 'i');
+            term_t a = a0 + i;
+            switch (argmode) {
+            case 'i':
+                if (fcinfo->argnull[i])
+                    PL_put_nil(a);
+                else {
+                    Datum datum = fcinfo->arg[i];
+                    switch(argtypes[i]) {
+                    case BOOLOID:
+                        if (!PL_put_bool(a, DatumGetBool(datum))) goto error;
+                        break;
+                    case INT2OID:
+                        if (!PL_put_integer(a, DatumGetInt16(datum))) goto error;
+                        break;
+                    case INT4OID:
+                        if (!PL_put_integer(a, DatumGetInt32(datum))) goto error;
+                        break;
+                    case INT8OID:
+                        if (!PL_put_int64(a, DatumGetInt64(datum))) goto error;
+                        break;
+                    case FLOAT4OID:
+                        if (!PL_put_float(a, DatumGetFloat4(datum))) goto error;
+                        break;
+                    case FLOAT8OID:
+                        if (!PL_put_float(a, DatumGetFloat8(datum))) goto error;
+                        break;
+                    case TEXTOID:
+                        printf("converting Pg text '%s' to SWI-Prolog\n", TextDatumGetCString(datum)); fflush(stdout);
+                        if (!PL_put_string_chars(a, utf_e2u(TextDatumGetCString(datum)))) goto error;
+                        break;
+                    default:
+                    error:
+                        PL_discard_foreign_frame(fid);
+                        ereport(ERROR,
+                                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                 errmsg("PL/SWI-Prolog functions cannot accept type %s",
+                                        format_type_be(argtypes[i]))));
+                    }
+                }
+            case 'o':
+                /* output: do nothing yet! */
                 break;
             default:
                 PL_discard_foreign_frame(fid);
                 ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                         errmsg("PL/SWI-Prolog functions cannot accept type %s",
-                                format_type_be(argtypes[i]))));
+                         errmsg("PL/SWI-Prolog functions cannot accept argument mode '%c'",
+                                argmode)));
             }
-        case 'o':
-            /* output: do nothing yet! */
-            break;
-        default:
+        }
+        
+        a1 = PL_new_term_refs(2);
+        if (!cons_functor_chars(a1 + 0, procStruct->proname.data, (retvoid ? nargs : nargs + 1), a0)) {
             PL_discard_foreign_frame(fid);
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                     errmsg("PL/SWI-Prolog functions cannot accept argument mode '%c'",
-                            argmode)));
+                     errmsg("PL/SWI-Prolog PL_cons_functor_v failed")));
+        }
+
+        prosrcdatum = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isNull);
+        if (isNull)
+            elog(ERROR, "null prosrc");
+        proSource = TextDatumGetCString(prosrcdatum);
+        if (!PL_put_string_chars(a1 + 1, proSource)) {
+            PL_discard_foreign_frame(fid);
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("PL/SWI-Prolog PL_put_string_chars failed")));
+        }
+
+        pfree(proSource);
+
+        qid = PL_open_query(NULL, PL_Q_CATCH_EXCEPTION, predicate_handle_function, a1);
+    }
+        
+    ok = PL_next_solution(qid);
+    if (!ok)
+        check_exception(qid, "while callin PLSWIPL function");
+
+    for (i = (argmodes ? 0 : nargs); i <= nargs; i++) {
+        Datum *datum;
+        Oid argtype;
+        bool *argnull;
+        if (i < nargs) {
+            if (argmodes[i] != 'o') continue;
+            argtype = argtypes[i];
+            argnull = fcinfo->argnull + i;
+            datum = fcinfo->arg + i;
+        }
+        else {
+            argtype = procStruct->prorettype;
+            argnull = &fcinfo->isnull;
+            datum = &out;
+        }
+        
+        if (ok) {
+            if (!plswipl_term_to_datum(a0 + i, argtype, datum)) {
+                PL_discard_foreign_frame(fid);
+                ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                         errmsg("PL/SWI-Prolog cannot convert output argument %i to type %s",
+                                i, format_type_be(argtype))));
+            }
+        }
+        else {
+            *argnull = 1;
+            *datum = (Datum)NULL;
         }
     }
 
-    a1 = PL_new_term_refs(2);
-    if (!cons_functor_chars(a1 + 0, procStruct->proname.data, nargs + 1, a0)) {
-        PL_discard_foreign_frame(fid);
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("PL/SWI-Prolog PL_cons_functor_v failed")));
+    if (procStruct->proretset && rsi) {
+        if (ok) {
+            first = 0;
+            rsi->isDone = ExprMultipleResult;
+            goto clean;
+        }
+        else
+            rsi->isDone = ExprEndResult;
     }
-
-    prosrcdatum = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isNull);
-    if (isNull)
-        elog(ERROR, "null prosrc");
-    proSource = TextDatumGetCString(prosrcdatum);
-    PL_put_string_chars(a1 + 1, proSource);
-    pfree(proSource);
-
-    qid = PL_open_query(NULL, PL_Q_CATCH_EXCEPTION, predicate_handle_function, a1);
-    if (!PL_next_solution(qid))
-        check_exception(qid, "while callin PLSWIPL function");
+    first = 1;
     PL_close_query(qid);
     PL_discard_foreign_frame(fid);
-    ereport(ERROR,
-            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-             errmsg("PL/SWI-Prolog everything was right until now!")));
-    PG_RETURN_VOID();
+    
+  clean:
+    ReleaseSysCache(procTup);
+    
+    return out;
 }
 
