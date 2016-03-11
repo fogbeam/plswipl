@@ -7,6 +7,51 @@ inside [PostgreSQL](http://www.postgresql.org/)!
 
 This is still a work in progress. Quering prolog barely works!
 
+== Installation
+
+    $ make
+    $ sudo make install
+
+Note that PostgreSQL development utilities and header files are required.
+
+== Example
+
+See the [example.prolog] file which contains the following predicate definition:
+
+```prolog
+break_chars(String, Char) :-
+        atom_chars(String, Chars),
+        member(Char, Chars).
+```
+
+From `psql` shell as superuser:
+
+    create extension plswipl;
+    CREATE EXTENSION
+    salva=# create or replace function break_chars(text) returns setof text as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language PLSWIPL;
+    CREATE FUNCTION
+    salva=# select break_chars('all the letters');
+     break_chars
+    -------------
+     a
+     l
+     l
+      
+     t
+     h
+     e
+      
+     l
+     e
+     t
+     t
+     e
+     r
+     s
+    (15 rows)
+    
+    salva=# 
+
 == Todo
 
 - Investigate how to convert data from/to the Prolog side correctly.
@@ -18,6 +63,13 @@ This is still a work in progress. Quering prolog barely works!
 - Add support for SPI
 
 - Add support for doing FDW in Prolog?
+
+- Store prolog modules inside the database.
+
+- Add trusted version for non superusers.
+
+- Learn how a procedural language interactuates with having more than
+  one schema or changing the session user.
 
 == Focus
 
