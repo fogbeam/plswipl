@@ -1,20 +1,20 @@
-= PL/SWI-Prolog
+# PL/SWI-Prolog
 
 Use [SWI-Prolog](http://www.swi-prolog.org/) as a Procedural Language
 inside [PostgreSQL](http://www.postgresql.org/)!
 
-== Status
+## Status
 
 This is still a work in progress. Quering prolog barely works!
 
-== Installation
+## Installation
 
     $ make
     $ sudo make install
 
 Note that PostgreSQL development utilities and header files are required.
 
-== Example
+## Example
 
 See the [example.prolog] file which contains the following predicate definition:
 
@@ -52,7 +52,7 @@ From `psql` shell as superuser:
     
     salva=# 
 
-== Todo
+## Todo
 
 - Investigate how to convert data from/to the Prolog side correctly.
 
@@ -71,7 +71,7 @@ From `psql` shell as superuser:
 - Learn how a procedural language interactuates with having more than
   one schema or changing the session user.
 
-== Focus
+## Focus
 
 My aim is getting PL/SWI-Prolog to be correct, flexible
 an powerful Procedural Language backend.
@@ -80,6 +80,6 @@ At this point, structured, flexible and clear is the most important
 thing. Optimizations making the code more complex are not welcomed
 yet!
 
-== License
+## License
 
 PL/SWI-Prolog is distributed under the MIT license. See the LICENSE file.
