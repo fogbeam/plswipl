@@ -76,8 +76,8 @@ From `psql` shell as superuser:
 
 ## Focus
 
-My aim is getting PL/SWI-Prolog to be correct, flexible
-an powerful Procedural Language backend.
+My aim is getting PL/SWI-Prolog to be a correct, flexible
+and powerful Procedural Language backend.
 
 At this point, structured, flexible and clear is the most important
 thing. Optimizations making the code more complex are not welcomed
