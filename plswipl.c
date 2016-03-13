@@ -11,6 +11,7 @@
 #include "access/htup_details.h"
 #include "catalog/pg_type.h"
 #include "mb/pg_wchar.h"
+#include "funcapi.h"
 
 #include <SWI-Prolog.h>
 
@@ -25,6 +26,17 @@ PG_FUNCTION_INFO_V1(plswipl_validator);
 PG_FUNCTION_INFO_V1(plswipl_function);
 
 void _PG_init(void);
+
+typedef struct {
+    fid_t fid;
+    qid_t qid;
+    term_t a0;
+    int nargs;
+    char *argmodes;
+    Oid *argtypes;
+    Oid rettype;
+    MemoryContextCallback callback;
+} plswipl_swiplctx;
 
 /* Global data */
 
@@ -183,6 +195,15 @@ plswipl_term_to_datum(term_t t, Oid type, Datum *datum) {
     return TRUE;
 }
 
+static void
+plswipl_clean_context(plswipl_swiplctx *swiplctx) {
+    if (swiplctx->fid) {
+        if (swiplctx->qid)
+            PL_close_query(swiplctx->qid);
+        PL_close_foreign_frame(swiplctx->fid);
+    }
+}
+
 Datum
 plswipl_function(PG_FUNCTION_ARGS) {
     Oid fn_oid = fcinfo->flinfo->fn_oid;
@@ -195,66 +216,78 @@ plswipl_function(PG_FUNCTION_ARGS) {
     char *proSource;
     bool isNull, retvoid, ok;
     int nargs, i;
-    static fid_t fid;
-    static term_t a0, a1;
-    static qid_t qid;
-    static bool first = 1;
+    fid_t fid;
+    term_t a0, a1;
+    qid_t qid;
     Datum out;
-
+    FuncCallContext  *funcctx = NULL;
+    plswipl_swiplctx *swiplctx = NULL;
+    MemoryContext oldcontext;
 
     static predicate_t predicate_handle_function = 0;
     if (!predicate_handle_function)
         predicate_handle_function = PL_predicate("handle_function", 2, "plswipl_low");
 
-    printf("fcinfo: %p, context: %p, resultinfo: %p, fncollation: %i, isnull: %d, nargs: %d, first: %d\n",
-           fcinfo, fcinfo->context, rsi, fcinfo->fncollation, fcinfo->isnull, fcinfo->nargs, first);
+    printf("fcinfo: %p, context: %p, resultinfo: %p, fncollation: %i, isnull: %d, nargs: %d\n",
+           fcinfo, fcinfo->context, rsi, fcinfo->fncollation, fcinfo->isnull, fcinfo->nargs);
     if (rsi)
         printf("ReturnSetInfo: %p, type: %i, econtext: %p, expectedDesc: %p, allowedModes: %i, "
                "returnMode: %i, isDone: %i, setResult: %p, setDesc: %p\n",
                rsi, rsi->type, rsi->econtext, rsi->expectedDesc, rsi->allowedModes,
                rsi->returnMode, rsi->isDone, rsi->setResult, rsi->setDesc);
     fflush(stdout);
-    
-    procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
-    if (!HeapTupleIsValid(procTup))
-        elog(ERROR, "cache lookup failed for function %u", fn_oid);
-    procStruct = (Form_pg_proc) GETSTRUCT(procTup);
-    rettype = procStruct->prorettype;
-    retvoid = (rettype == VOIDOID);
-    nargs = procStruct->pronargs;
 
-    proallargtypes = SysCacheGetAttr(PROCOID, procTup,  Anum_pg_proc_proallargtypes, &isNull);
-    if (isNull) {
-        if (procStruct->proargtypes.dim1 != nargs) elog(ERROR, "size mismatch between function arguments and type array");
-        argtypes = procStruct->proargtypes.values;
-    }
-    else {
-        ArrayType *arr = DatumGetArrayTypeP(proallargtypes);
-        if ((ARR_NDIM(arr) != 1)       ||
-            (ARR_DIMS(arr)[0] < nargs) ||
-            ARR_HASNULL(arr)           ||
-            (ARR_ELEMTYPE(arr) != OIDOID)) elog(ERROR, "proallargtypes is not a 1-D Oid array");
-        nargs = ARR_DIMS(arr)[0];
-        argtypes = (Oid*)ARR_DATA_PTR(arr);
-    }
+    if (SRF_IS_FIRSTCALL()) {
+        procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
+        if (!HeapTupleIsValid(procTup))
+            elog(ERROR, "cache lookup failed for function %u", fn_oid);
+        procStruct = (Form_pg_proc) GETSTRUCT(procTup);
+        rettype = procStruct->prorettype;
+        retvoid = (rettype == VOIDOID);
+        nargs = procStruct->pronargs;
 
-    proargmodes = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_proargmodes, &isNull);
-    if (isNull)
-        argmodes = NULL;
-    else {
-        ArrayType *arr = DatumGetArrayTypeP(proargmodes);
-        if ((ARR_NDIM(arr) != 1 )       ||
-            (ARR_DIMS(arr)[0] != nargs) ||
-            ARR_HASNULL(arr)            ||
-            (ARR_ELEMTYPE(arr) != CHAROID)) elog(ERROR, "proargmodes is not a 1-D char array");
-        argmodes = (char*)ARR_DATA_PTR(arr);
-    }
+        proallargtypes = SysCacheGetAttr(PROCOID, procTup,  Anum_pg_proc_proallargtypes, &isNull);
+        if (isNull) {
+            if (procStruct->proargtypes.dim1 != nargs) elog(ERROR, "size mismatch between function arguments and type array");
+            argtypes = procStruct->proargtypes.values;
+        }
+        else {
+            ArrayType *arr = DatumGetArrayTypeP(proallargtypes);
+            if ((ARR_NDIM(arr) != 1)       ||
+                (ARR_DIMS(arr)[0] < nargs) ||
+                ARR_HASNULL(arr)           ||
+                (ARR_ELEMTYPE(arr) != OIDOID)) elog(ERROR, "proallargtypes is not a 1-D Oid array");
+            nargs = ARR_DIMS(arr)[0];
+            argtypes = (Oid*)ARR_DATA_PTR(arr);
+        }
 
-    /* first = (!procStruct->proretset || rsi || (rsi->isDone == ExprSingleResult)); */
+        proargmodes = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_proargmodes, &isNull);
+        if (isNull)
+            argmodes = NULL;
+        else {
+            ArrayType *arr = DatumGetArrayTypeP(proargmodes);
+            if ((ARR_NDIM(arr) != 1 )       ||
+                (ARR_DIMS(arr)[0] != nargs) ||
+                ARR_HASNULL(arr)            ||
+                (ARR_ELEMTYPE(arr) != CHAROID)) elog(ERROR, "proargmodes is not a 1-D char array");
+            argmodes = (char*)ARR_DATA_PTR(arr);
+        }
 
-    if (first) {
-    
+        if (procStruct->proretset) {
+            funcctx = SRF_FIRSTCALL_INIT();
+            oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+        }
+
+        swiplctx = (plswipl_swiplctx*)(funcctx->user_fctx = palloc(sizeof(plswipl_swiplctx)));
+        swiplctx->fid = 0;
+        swiplctx->qid = 0;
+        swiplctx->callback.arg = (void *)swiplctx;
+        swiplctx->callback.func = (MemoryContextCallbackFunction)plswipl_clean_context;
+        MemoryContextRegisterResetCallback(CurrentMemoryContext, &(swiplctx->callback));
+
         fid = PL_open_foreign_frame();
+        swiplctx->fid = fid;
+
         a0 = PL_new_term_refs(nargs + 1);
 
         for (i = 0; i < nargs; i++) {
@@ -291,7 +324,6 @@ plswipl_function(PG_FUNCTION_ARGS) {
                         break;
                     default:
                     error:
-                        PL_discard_foreign_frame(fid);
                         ereport(ERROR,
                                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                                  errmsg("PL/SWI-Prolog functions cannot accept type %s",
@@ -302,7 +334,6 @@ plswipl_function(PG_FUNCTION_ARGS) {
                 /* output: do nothing yet! */
                 break;
             default:
-                PL_discard_foreign_frame(fid);
                 ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("PL/SWI-Prolog functions cannot accept argument mode '%c'",
@@ -312,7 +343,6 @@ plswipl_function(PG_FUNCTION_ARGS) {
         
         a1 = PL_new_term_refs(2);
         if (!cons_functor_chars(a1 + 0, procStruct->proname.data, (retvoid ? nargs : nargs + 1), a0)) {
-            PL_discard_foreign_frame(fid);
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("PL/SWI-Prolog PL_cons_functor_v failed")));
@@ -323,17 +353,44 @@ plswipl_function(PG_FUNCTION_ARGS) {
             elog(ERROR, "null prosrc");
         proSource = TextDatumGetCString(prosrcdatum);
         if (!PL_put_string_chars(a1 + 1, proSource)) {
-            PL_discard_foreign_frame(fid);
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("PL/SWI-Prolog PL_put_string_chars failed")));
         }
 
-        pfree(proSource);
-
         qid = PL_open_query(NULL, PL_Q_CATCH_EXCEPTION, predicate_handle_function, a1);
+        swiplctx->qid = qid;
+
+        if (procStruct->proretset) {
+            swiplctx->a0 = a0;
+            swiplctx->nargs = nargs;
+            if (argmodes) {
+                swiplctx->argmodes = pnstrdup(argmodes, nargs);
+                swiplctx->argtypes = palloc(nargs * sizeof(Oid));
+                memcpy(swiplctx->argtypes, argtypes, nargs * sizeof(Oid));
+            }
+            else {
+                swiplctx->argmodes = NULL;
+                swiplctx->argtypes = NULL;
+            }
+            swiplctx->rettype = rettype;
+            MemoryContextSwitchTo(oldcontext);
+        }
+
+        ReleaseSysCache(procTup);
     }
-        
+    else {
+        funcctx = SRF_PERCALL_SETUP();
+        swiplctx = (plswipl_swiplctx*)funcctx->user_fctx;
+        fid = swiplctx->fid;
+        qid = swiplctx->fid;
+        a0 = swiplctx->a0;
+        nargs = swiplctx->nargs;
+        argmodes = swiplctx->argmodes;
+        argtypes = swiplctx->argtypes;
+        rettype = swiplctx->rettype;
+    }
+    
     ok = PL_next_solution(qid);
     if (!ok)
         check_exception(qid, "while callin PLSWIPL function");
@@ -349,14 +406,13 @@ plswipl_function(PG_FUNCTION_ARGS) {
             datum = fcinfo->arg + i;
         }
         else {
-            argtype = procStruct->prorettype;
+            argtype = rettype;
             argnull = &fcinfo->isnull;
             datum = &out;
         }
         
         if (ok) {
             if (!plswipl_term_to_datum(a0 + i, argtype, datum)) {
-                PL_discard_foreign_frame(fid);
                 ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("PL/SWI-Prolog cannot convert output argument %i to type %s",
@@ -369,22 +425,14 @@ plswipl_function(PG_FUNCTION_ARGS) {
         }
     }
 
-    if (procStruct->proretset && rsi) {
-        if (ok) {
-            first = 0;
-            rsi->isDone = ExprMultipleResult;
-            goto clean;
+    if (funcctx) {
+        if (ok)
+            SRF_RETURN_NEXT(funcctx, out);
+        else {
+            PL_close_query(qid);
+            SRF_RETURN_DONE(funcctx);
         }
-        else
-            rsi->isDone = ExprEndResult;
     }
-    first = 1;
-    PL_close_query(qid);
-    PL_discard_foreign_frame(fid);
-    
-  clean:
-    ReleaseSysCache(procTup);
-    
     return out;
 }
 
