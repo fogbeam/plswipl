@@ -59,7 +59,7 @@ From `psql` shell as superuser:
 
 - Add support for more data types, specifically arrays and json(b?)
 
-- Learn how memory handling works under Pg and take advantage of it
+- Learn how memory handling works under Pg and take advantage of it (**DONE!**)
 
 - Add support for SPI
 
@@ -76,7 +76,7 @@ From `psql` shell as superuser:
 
 - Investigate higher level approaches to Prolog/SQL interaction.
 
-- Investigate how to use Prolog to provided a Datalog (or similar)
+- Investigate how to use Prolog to provide a Datalog (or similar)
   interface to Pg.
 
 ## Focus
@@ -84,9 +84,10 @@ From `psql` shell as superuser:
 My aim is getting PL/SWI-Prolog to be a correct, flexible
 and powerful Procedural Language backend.
 
-At this point, structured, flexible and clear is the most important
-thing. Optimizations making the code more complex are not welcomed
-yet!
+At this point, structured, flexible and clear code is the most important
+thing.
+
+Resist to optimize if that means making the code more complex.
 
 ## Collaborating
 
@@ -94,4 +95,5 @@ Collaborations welcome! Just fork the project and start submiting pull requests!
 
 ## License
 
-PL/SWI-Prolog is distributed under the MIT license. See the LICENSE file.
+The PL/SWI-Prolog extension is distributed under the MIT license. See
+the LICENSE file.
