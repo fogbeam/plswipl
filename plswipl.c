@@ -1,17 +1,18 @@
 #include "postgres.h"
 #include "fmgr.h"
-#include "utils/guc.h"
-#include "commands/trigger.h"
-#include "miscadmin.h"
+#include "funcapi.h"
 #include "port.h"
+#include "miscadmin.h"
+#include "access/htup_details.h"
+#include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
+#include "commands/trigger.h"
+#include "mb/pg_wchar.h"
+#include "utils/palloc.h"
+#include "utils/guc.h"
 #include "utils/elog.h"
 #include "utils/syscache.h"
 #include "utils/builtins.h"
-#include "catalog/pg_proc.h"
-#include "access/htup_details.h"
-#include "catalog/pg_type.h"
-#include "mb/pg_wchar.h"
-#include "funcapi.h"
 
 #include <SWI-Prolog.h>
 
@@ -101,14 +102,12 @@ static void
 check_exception(qid_t qid, char *context) {
     term_t e = PL_exception(qid);
     if (e) {
-        char *e_chars;
-        if (!PL_get_chars(e, &e_chars, CVT_ALL|CVT_VARIABLE|CVT_WRITE|BUF_MALLOC|REP_UTF8))
-            e_chars = NULL;
-        ereport(ERROR,
-                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("exception %i %s", (int)e, (e_chars ? e_chars : "*UNKNOWN*")),
-                 errcontext("%s", context)));
-            if (e_chars) PL_free(e_chars);
+        char *e_chars = NULL;
+        if (PL_get_chars(e, &e_chars, CVT_ALL|CVT_VARIABLE|CVT_WRITE|BUF_RING|REP_UTF8))
+            ereport(ERROR,
+                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                     errmsg("exception %i %s", (int)e, (e_chars ? e_chars : "*UNKNOWN*")),
+                     errcontext("%s", context)));
     }
 }
 
@@ -178,7 +177,7 @@ plswipl_term_to_datum(term_t t, Oid type, Datum *datum) {
             if ((uint64_t)v >> 32) return FALSE;
             *datum = Int32GetDatum(v);
         }
-        else { /* INT8OID */                    
+        else { /* INT8OID */
             *datum = Int64GetDatum(v);
         }
         break;
@@ -197,6 +196,8 @@ plswipl_term_to_datum(term_t t, Oid type, Datum *datum) {
 
 static void
 plswipl_clean_context(plswipl_swiplctx *swiplctx) {
+    printf("plswipl_clean_context: %p, fid: %li, qid: %li\n",
+           swiplctx, swiplctx->fid, swiplctx->qid); fflush(stdout);
     if (swiplctx->fid) {
         if (swiplctx->qid)
             PL_close_query(swiplctx->qid);
@@ -219,10 +220,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
     fid_t fid;
     term_t a0, a1;
     qid_t qid;
-    Datum out;
     FuncCallContext  *funcctx = NULL;
-    plswipl_swiplctx *swiplctx = NULL;
-    MemoryContext oldcontext;
 
     static predicate_t predicate_handle_function = 0;
     if (!predicate_handle_function)
@@ -238,6 +236,9 @@ plswipl_function(PG_FUNCTION_ARGS) {
     fflush(stdout);
 
     if (SRF_IS_FIRSTCALL()) {
+        plswipl_swiplctx *swiplctx;
+        MemoryContext oldcontext = NULL;
+
         procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
         if (!HeapTupleIsValid(procTup))
             elog(ERROR, "cache lookup failed for function %u", fn_oid);
@@ -278,7 +279,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
             oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
         }
 
-        swiplctx = (plswipl_swiplctx*)(funcctx->user_fctx = palloc(sizeof(plswipl_swiplctx)));
+        swiplctx =(plswipl_swiplctx*)palloc(sizeof(plswipl_swiplctx));
         swiplctx->fid = 0;
         swiplctx->qid = 0;
         swiplctx->callback.arg = (void *)swiplctx;
@@ -340,7 +341,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
                                 argmode)));
             }
         }
-        
+
         a1 = PL_new_term_refs(2);
         if (!cons_functor_chars(a1 + 0, procStruct->proname.data, (retvoid ? nargs : nargs + 1), a0)) {
             ereport(ERROR,
@@ -362,6 +363,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
         swiplctx->qid = qid;
 
         if (procStruct->proretset) {
+            funcctx->user_fctx = swiplctx;
             swiplctx->a0 = a0;
             swiplctx->nargs = nargs;
             if (argmodes) {
@@ -380,59 +382,54 @@ plswipl_function(PG_FUNCTION_ARGS) {
         ReleaseSysCache(procTup);
     }
     else {
+        plswipl_swiplctx *swiplctx;
         funcctx = SRF_PERCALL_SETUP();
         swiplctx = (plswipl_swiplctx*)funcctx->user_fctx;
         fid = swiplctx->fid;
-        qid = swiplctx->fid;
+        qid = swiplctx->qid;
         a0 = swiplctx->a0;
         nargs = swiplctx->nargs;
         argmodes = swiplctx->argmodes;
         argtypes = swiplctx->argtypes;
         rettype = swiplctx->rettype;
-    }
-    
-    ok = PL_next_solution(qid);
-    if (!ok)
-        check_exception(qid, "while callin PLSWIPL function");
 
-    for (i = (argmodes ? 0 : nargs); i <= nargs; i++) {
-        Datum *datum;
-        Oid argtype;
-        bool *argnull;
-        if (i < nargs) {
-            if (argmodes[i] != 'o') continue;
-            argtype = argtypes[i];
-            argnull = fcinfo->argnull + i;
-            datum = fcinfo->arg + i;
-        }
-        else {
-            argtype = rettype;
-            argnull = &fcinfo->isnull;
-            datum = &out;
-        }
-        
-        if (ok) {
-            if (!plswipl_term_to_datum(a0 + i, argtype, datum)) {
-                ereport(ERROR,
-                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                         errmsg("PL/SWI-Prolog cannot convert output argument %i to type %s",
-                                i, format_type_be(argtype))));
+        printf("SRF again!\n");
+    }
+
+    printf("fid: %li, qid: %li, a0: %li, nargs: %i, argmodes: %s, argtypes: %p, rettype: %i\n",
+           fid, qid, a0, nargs, argmodes, argtypes, rettype); fflush(stdout);
+
+    ok = PL_next_solution(qid);
+    if (ok) {
+        Datum out;
+        if (argmodes) {
+            for (i = 0; i < nargs; i++) {
+                if (argmodes[i] == 'o') {
+                    if (!plswipl_term_to_datum(a0 + i, argtypes[i], fcinfo->arg + i))
+                        ereport(ERROR,
+                                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                 errmsg("PL/SWI-Prolog cannot convert output argument %i to type %s",
+                                        i, format_type_be(argtypes[i]))));
+                }
             }
         }
-        else {
-            *argnull = 1;
-            *datum = (Datum)NULL;
-        }
+        if (!plswipl_term_to_datum(a0 + nargs, rettype, &out))
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("PL/SWI-Prolog cannot convert output value to type %s",
+                            format_type_be(rettype))));
+
+        if (funcctx)
+            SRF_RETURN_NEXT(funcctx, out);
+
+        return out;
     }
 
-    if (funcctx) {
-        if (ok)
-            SRF_RETURN_NEXT(funcctx, out);
-        else {
-            PL_close_query(qid);
-            SRF_RETURN_DONE(funcctx);
-        }
-    }
-    return out;
+    check_exception(qid, "while callin PLSWIPL function");
+    if (funcctx)
+        SRF_RETURN_DONE(funcctx);
+    ereport(ERROR,
+            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+             errmsg("PL/SWI-Prolog function failed")));
 }
 
