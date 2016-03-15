@@ -1,7 +1,7 @@
 MODULE_big = plswipl
 EXTENSION = plswipl
 DOCS = README.plswipl
-OBJS = plswipl.o
+OBJS = plswipl.o spi.o
 
 plswipl_version = 0.1
 

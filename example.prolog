@@ -13,3 +13,9 @@ break_chars(String, Char) :-
 prolog_length(X, L) :-
         atom_chars(X, A),
         length(A, L).
+
+prolog_spi_execute(Text, N, R) :-
+        spi:connect,
+        spi:execute(Text, false, 0, R),
+        spi:processed(N),
+        spi:finish.

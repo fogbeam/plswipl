@@ -1,20 +1,4 @@
-#include "postgres.h"
-#include "fmgr.h"
-#include "funcapi.h"
-#include "port.h"
-#include "miscadmin.h"
-#include "access/htup_details.h"
-#include "catalog/pg_proc.h"
-#include "catalog/pg_type.h"
-#include "commands/trigger.h"
-#include "mb/pg_wchar.h"
-#include "utils/palloc.h"
-#include "utils/guc.h"
-#include "utils/elog.h"
-#include "utils/syscache.h"
-#include "utils/builtins.h"
-
-#include <SWI-Prolog.h>
+#include "plswipl.h"
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
@@ -29,10 +13,11 @@ PG_FUNCTION_INFO_V1(plswipl_function);
 void _PG_init(void);
 
 typedef struct {
+    bool spi_pushed;
     fid_t fid;
     qid_t qid;
     term_t a0;
-    int nargs;
+    int nargs, ninargs;
     char *argmodes;
     Oid *argtypes;
     Oid rettype;
@@ -68,11 +53,14 @@ _PG_init(void) {
         for (p = plswipl_argv; *p; p++) printf(" \"%s\"", *p);
         printf(".\n");
 
-        if (PL_initialise(5, plswipl_argv)) {
-            inited = 1;
-            return;
+        if (!PL_initialise(5, plswipl_argv)) {
+            PL_halt(1);
+            elog(ERROR, "PL_initialise failed");
         }
-        PL_halt(1);
+
+        PL_register_extensions_in_module("spi", plswipl_spi_extension);
+
+        inited = 1;
     }
 }
 
@@ -198,6 +186,8 @@ static void
 plswipl_clean_context(plswipl_swiplctx *swiplctx) {
     printf("plswipl_clean_context: %p, fid: %li, qid: %li\n",
            swiplctx, swiplctx->fid, swiplctx->qid); fflush(stdout);
+    if (swiplctx->spi_pushed)
+        SPI_pop();
     if (swiplctx->fid) {
         if (swiplctx->qid)
             PL_close_query(swiplctx->qid);
@@ -216,7 +206,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
     char *argmodes;
     char *proSource;
     bool isNull, retvoid, ok;
-    int nargs, i;
+    int nargs, ninargs, i, j;
     fid_t fid;
     term_t a0, a1;
     qid_t qid;
@@ -244,7 +234,6 @@ plswipl_function(PG_FUNCTION_ARGS) {
             elog(ERROR, "cache lookup failed for function %u", fn_oid);
         procStruct = (Form_pg_proc) GETSTRUCT(procTup);
         rettype = procStruct->prorettype;
-        retvoid = (rettype == VOIDOID);
         nargs = procStruct->pronargs;
 
         proallargtypes = SysCacheGetAttr(PROCOID, procTup,  Anum_pg_proc_proallargtypes, &isNull);
@@ -280,6 +269,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
         }
 
         swiplctx =(plswipl_swiplctx*)palloc(sizeof(plswipl_swiplctx));
+        swiplctx->spi_pushed = 0;
         swiplctx->fid = 0;
         swiplctx->qid = 0;
         swiplctx->callback.arg = (void *)swiplctx;
@@ -291,15 +281,15 @@ plswipl_function(PG_FUNCTION_ARGS) {
 
         a0 = PL_new_term_refs(nargs + 1);
 
-        for (i = 0; i < nargs; i++) {
+        for (j = i = 0; i < nargs; i++) {
             char argmode = (argmodes ? argmodes[i] : 'i');
             term_t a = a0 + i;
             switch (argmode) {
             case 'i':
-                if (fcinfo->argnull[i])
+                if (fcinfo->argnull[j])
                     PL_put_nil(a);
                 else {
-                    Datum datum = fcinfo->arg[i];
+                    Datum datum = fcinfo->arg[j];
                     switch(argtypes[i]) {
                     case BOOLOID:
                         if (!PL_put_bool(a, DatumGetBool(datum))) goto error;
@@ -330,6 +320,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
                                  errmsg("PL/SWI-Prolog functions cannot accept type %s",
                                         format_type_be(argtypes[i]))));
                     }
+                    j++;
                 }
             case 'o':
                 /* output: do nothing yet! */
@@ -341,9 +332,14 @@ plswipl_function(PG_FUNCTION_ARGS) {
                                 argmode)));
             }
         }
+        ninargs = j;
+        retvoid = ( (rettype == VOIDOID) || (ninargs < nargs) );
 
+        if (ninargs + 1 < nargs)
+            elog(ERROR, "returning a tuple is still not supported by PL/SWI-Prolog");
+        
         a1 = PL_new_term_refs(2);
-        if (!cons_functor_chars(a1 + 0, procStruct->proname.data, (retvoid ? nargs : nargs + 1), a0)) {
+        if (!cons_functor_chars(a1 + 0, procStruct->proname.data, nargs + (retvoid ? 0 : 1), a0)) {
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("PL/SWI-Prolog PL_cons_functor_v failed")));
@@ -366,6 +362,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
             funcctx->user_fctx = swiplctx;
             swiplctx->a0 = a0;
             swiplctx->nargs = nargs;
+            swiplctx->ninargs = ninargs;
             if (argmodes) {
                 swiplctx->argmodes = pnstrdup(argmodes, nargs);
                 swiplctx->argtypes = palloc(nargs * sizeof(Oid));
@@ -380,6 +377,11 @@ plswipl_function(PG_FUNCTION_ARGS) {
         }
 
         ReleaseSysCache(procTup);
+
+        /*
+          SPI_push();
+          swiplctx->spi_pushed = 1;
+        */
     }
     else {
         plswipl_swiplctx *swiplctx;
@@ -389,10 +391,11 @@ plswipl_function(PG_FUNCTION_ARGS) {
         qid = swiplctx->qid;
         a0 = swiplctx->a0;
         nargs = swiplctx->nargs;
+        ninargs = swiplctx->ninargs;
         argmodes = swiplctx->argmodes;
         argtypes = swiplctx->argtypes;
         rettype = swiplctx->rettype;
-
+        retvoid = ( (rettype == VOIDOID) || (ninargs < nargs) );
         printf("SRF again!\n");
     }
 
@@ -403,22 +406,24 @@ plswipl_function(PG_FUNCTION_ARGS) {
     if (ok) {
         Datum out;
         if (argmodes) {
-            for (i = 0; i < nargs; i++) {
+            for (j = ninargs, i = 0; i < nargs; i++) {
                 if (argmodes[i] == 'o') {
-                    if (!plswipl_term_to_datum(a0 + i, argtypes[i], fcinfo->arg + i))
+                    if (!plswipl_term_to_datum(a0 + i, argtypes[i], &out))
                         ereport(ERROR,
                                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                                  errmsg("PL/SWI-Prolog cannot convert output argument %i to type %s",
                                         i, format_type_be(argtypes[i]))));
+                    j++;
                 }
             }
         }
-        if (!plswipl_term_to_datum(a0 + nargs, rettype, &out))
-            ereport(ERROR,
-                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                     errmsg("PL/SWI-Prolog cannot convert output value to type %s",
-                            format_type_be(rettype))));
-
+        else if (!retvoid) {
+            if (!plswipl_term_to_datum(a0 + nargs, rettype, &out))
+                ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                         errmsg("PL/SWI-Prolog cannot convert output value to type %s",
+                                format_type_be(rettype))));
+        }
         if (funcctx)
             SRF_RETURN_NEXT(funcctx, out);
 
