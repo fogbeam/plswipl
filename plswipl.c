@@ -21,8 +21,10 @@ typedef struct {
     char *argmodes;
     Oid *argtypes;
     Oid rettype;
+    TypeFuncClass retclass;
+    TupleDesc rettupledesc;
     MemoryContextCallback callback;
-} plswipl_swiplctx;
+} plswipl_srfctx;
 
 /* Global data */
 
@@ -140,58 +142,59 @@ utf_e2u(const char *str) {
     return pg_server_to_any(str, strlen(str), PG_UTF8);
 }
 
-static bool
-plswipl_term_to_datum(term_t t, Oid type, Datum *datum) {
+static Datum
+plswipl_term_to_datum(term_t t, Oid type) {
+    char *str;
     switch(type) {
-    case VOIDOID:
-        *datum = (Datum)0;
-        break;
     case BOOLOID: {
         int v;
-        if (!PL_get_bool(t, &v)) return FALSE;
-        *datum = BoolGetDatum(v);
+        if (PL_get_bool(t, &v))
+            return BoolGetDatum(v);
         break;
     }
     case INT2OID:
     case INT4OID:
     case INT8OID: {
         int64_t v;
-        if (!PL_get_int64(t, &v)) return FALSE;
-        if (type == INT2OID) {
-            if ((uint64_t)v >> 16) return FALSE;
-            *datum = Int16GetDatum(v);
-        }
-        else if (type == INT4OID) {
-            if ((uint64_t)v >> 32) return FALSE;
-            *datum = Int32GetDatum(v);
-        }
-        else { /* INT8OID */
-            *datum = Int64GetDatum(v);
+        if (PL_get_int64(t, &v)) {
+            if (type == INT2OID) {
+                if (((uint64_t)v >> 16) == 0)
+                    return Int16GetDatum(v);
+            }
+            else if (type == INT4OID) {
+                if (((uint64_t)v >> 32) == 0)
+                    return Int32GetDatum(v);
+            }
+            else return Int64GetDatum(v);
         }
         break;
     }
     case TEXTOID: {
         char *v;
-        if (!PL_get_chars(t, &v, CVT_ALL|BUF_RING|REP_UTF8)) return FALSE;
-        *datum = PointerGetDatum(DirectFunctionCall1(textin, PointerGetDatum(v)));
-        break;
+        if (PL_get_chars(t, &v, CVT_ALL|BUF_RING|REP_UTF8))
+            return PointerGetDatum(DirectFunctionCall1(textin, PointerGetDatum(v)));
     }
-    default:
-        return FALSE;
     }
-    return TRUE;
+
+    if (!PL_get_chars(t, &str, CVT_ALL|CVT_VARIABLE|CVT_WRITE|BUF_RING|REP_UTF8))
+        str = "***unwritable***";
+    elog(ERROR,
+         "Cannot convert prolog term '%s' (%d) to PostgreSQL type %s (%d)",
+         str, PL_term_type(t), format_type_be(type), type);
+
+    return 0; /* unreachable */
 }
 
 static void
-plswipl_clean_context(plswipl_swiplctx *swiplctx) {
+plswipl_clean_context(plswipl_srfctx *srfctx) {
     printf("plswipl_clean_context: %p, fid: %li, qid: %li\n",
-           swiplctx, swiplctx->fid, swiplctx->qid); fflush(stdout);
-    if (swiplctx->spi_pushed)
+           srfctx, srfctx->fid, srfctx->qid); fflush(stdout);
+    if (srfctx->spi_pushed)
         SPI_pop();
-    if (swiplctx->fid) {
-        if (swiplctx->qid)
-            PL_close_query(swiplctx->qid);
-        PL_close_foreign_frame(swiplctx->fid);
+    if (srfctx->fid) {
+        if (srfctx->qid)
+            PL_close_query(srfctx->qid);
+        PL_close_foreign_frame(srfctx->fid);
     }
 }
 
@@ -205,12 +208,14 @@ plswipl_function(PG_FUNCTION_ARGS) {
     Oid *argtypes, rettype;
     char *argmodes;
     char *proSource;
-    bool isNull, retvoid, ok;
-    int nargs, ninargs, i, j;
+    bool isNull, ok;
+    int nargs, ninargs, noutargs, i, j;
     fid_t fid;
     term_t a0, a1;
     qid_t qid;
     FuncCallContext  *funcctx = NULL;
+    TupleDesc rettupledesc;
+    TypeFuncClass retclass;
 
     static predicate_t predicate_handle_function = 0;
     if (!predicate_handle_function)
@@ -226,14 +231,13 @@ plswipl_function(PG_FUNCTION_ARGS) {
     fflush(stdout);
 
     if (SRF_IS_FIRSTCALL()) {
-        plswipl_swiplctx *swiplctx;
+        plswipl_srfctx *srfctx;
         MemoryContext oldcontext = NULL;
 
         procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
         if (!HeapTupleIsValid(procTup))
             elog(ERROR, "cache lookup failed for function %u", fn_oid);
         procStruct = (Form_pg_proc) GETSTRUCT(procTup);
-        rettype = procStruct->prorettype;
         nargs = procStruct->pronargs;
 
         proallargtypes = SysCacheGetAttr(PROCOID, procTup,  Anum_pg_proc_proallargtypes, &isNull);
@@ -268,16 +272,18 @@ plswipl_function(PG_FUNCTION_ARGS) {
             oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
         }
 
-        swiplctx =(plswipl_swiplctx*)palloc(sizeof(plswipl_swiplctx));
-        swiplctx->spi_pushed = 0;
-        swiplctx->fid = 0;
-        swiplctx->qid = 0;
-        swiplctx->callback.arg = (void *)swiplctx;
-        swiplctx->callback.func = (MemoryContextCallbackFunction)plswipl_clean_context;
-        MemoryContextRegisterResetCallback(CurrentMemoryContext, &(swiplctx->callback));
+        srfctx =(plswipl_srfctx*)palloc(sizeof(plswipl_srfctx));
+        srfctx->spi_pushed = 0;
+        srfctx->qid = 0;
+        srfctx->callback.arg = (void *)srfctx;
+        srfctx->callback.func = (MemoryContextCallbackFunction)plswipl_clean_context;
+
+        retclass = get_call_result_type(fcinfo, &rettype, &rettupledesc);
 
         fid = PL_open_foreign_frame();
-        swiplctx->fid = fid;
+        srfctx->fid = fid;
+
+        MemoryContextRegisterResetCallback(CurrentMemoryContext, &(srfctx->callback));
 
         a0 = PL_new_term_refs(nargs + 1);
 
@@ -333,13 +339,14 @@ plswipl_function(PG_FUNCTION_ARGS) {
             }
         }
         ninargs = j;
-        retvoid = ( (rettype == VOIDOID) || (ninargs < nargs) );
+        noutargs = nargs - ninargs;
+        if ((noutargs == 0) && (rettype != VOIDOID)) {
+            nargs++;
+            noutargs++;
+        }
 
-        if (ninargs + 1 < nargs)
-            elog(ERROR, "returning a tuple is still not supported by PL/SWI-Prolog");
-        
         a1 = PL_new_term_refs(2);
-        if (!cons_functor_chars(a1 + 0, procStruct->proname.data, nargs + (retvoid ? 0 : 1), a0)) {
+        if (!cons_functor_chars(a1 + 0, procStruct->proname.data, nargs, a0)) {
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("PL/SWI-Prolog PL_cons_functor_v failed")));
@@ -355,47 +362,49 @@ plswipl_function(PG_FUNCTION_ARGS) {
                      errmsg("PL/SWI-Prolog PL_put_string_chars failed")));
         }
 
-        qid = PL_open_query(NULL, PL_Q_CATCH_EXCEPTION, predicate_handle_function, a1);
-        swiplctx->qid = qid;
-
         if (procStruct->proretset) {
-            funcctx->user_fctx = swiplctx;
-            swiplctx->a0 = a0;
-            swiplctx->nargs = nargs;
-            swiplctx->ninargs = ninargs;
+            funcctx->user_fctx = srfctx;
+            srfctx->a0 = a0;
+            srfctx->nargs = nargs;
+            srfctx->ninargs = ninargs;
+            srfctx->rettupledesc = rettupledesc;
             if (argmodes) {
-                swiplctx->argmodes = pnstrdup(argmodes, nargs);
-                swiplctx->argtypes = palloc(nargs * sizeof(Oid));
-                memcpy(swiplctx->argtypes, argtypes, nargs * sizeof(Oid));
+                srfctx->argmodes = pnstrdup(argmodes, nargs);
+                srfctx->argtypes = palloc(nargs * sizeof(Oid));
+                memcpy(srfctx->argtypes, argtypes, nargs * sizeof(Oid));
             }
             else {
-                swiplctx->argmodes = NULL;
-                swiplctx->argtypes = NULL;
+                srfctx->argmodes = NULL;
+                srfctx->argtypes = NULL;
             }
-            swiplctx->rettype = rettype;
+            srfctx->rettype = rettype;
             MemoryContextSwitchTo(oldcontext);
         }
 
         ReleaseSysCache(procTup);
 
+        qid = PL_open_query(NULL, PL_Q_CATCH_EXCEPTION, predicate_handle_function, a1);
+        srfctx->qid = qid;
+
         /*
           SPI_push();
-          swiplctx->spi_pushed = 1;
+          srfctx->spi_pushed = 1;
         */
     }
     else {
-        plswipl_swiplctx *swiplctx;
+        plswipl_srfctx *srfctx;
         funcctx = SRF_PERCALL_SETUP();
-        swiplctx = (plswipl_swiplctx*)funcctx->user_fctx;
-        fid = swiplctx->fid;
-        qid = swiplctx->qid;
-        a0 = swiplctx->a0;
-        nargs = swiplctx->nargs;
-        ninargs = swiplctx->ninargs;
-        argmodes = swiplctx->argmodes;
-        argtypes = swiplctx->argtypes;
-        rettype = swiplctx->rettype;
-        retvoid = ( (rettype == VOIDOID) || (ninargs < nargs) );
+        srfctx = (plswipl_srfctx*)funcctx->user_fctx;
+        fid = srfctx->fid;
+        qid = srfctx->qid;
+        a0 = srfctx->a0;
+        nargs = srfctx->nargs;
+        ninargs = srfctx->ninargs;
+        noutargs = nargs - ninargs;
+        argmodes = srfctx->argmodes;
+        argtypes = srfctx->argtypes;
+        rettype = srfctx->rettype;
+        rettupledesc = srfctx->rettupledesc;
         printf("SRF again!\n");
     }
 
@@ -405,36 +414,48 @@ plswipl_function(PG_FUNCTION_ARGS) {
     ok = PL_next_solution(qid);
     if (ok) {
         Datum out;
-        if (argmodes) {
-            for (j = ninargs, i = 0; i < nargs; i++) {
+        if (noutargs == 1) {
+            int i;
+            if (argmodes) {
+                for (i = 0; (i < nargs - 1) && (argmodes[i] == 'i'); i++);
+            }
+            else
+                i = nargs - 1;
+            out = plswipl_term_to_datum(a0 + i, rettype);
+        }
+        else if (noutargs > 1) {
+            Datum *outs = (Datum *)palloc(sizeof(Datum) * noutargs);
+            bool *isnulls = (bool *)palloc(sizeof(bool) * noutargs);
+            Assert(rettupledesc != NULL);
+            Assert(argmodes != NULL);
+            for (j = i = 0; i < nargs; i++) {
                 if (argmodes[i] == 'o') {
-                    if (!plswipl_term_to_datum(a0 + i, argtypes[i], &out))
-                        ereport(ERROR,
-                                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                                 errmsg("PL/SWI-Prolog cannot convert output argument %i to type %s",
-                                        i, format_type_be(argtypes[i]))));
+                    outs[j] = plswipl_term_to_datum(a0 + i, rettupledesc->attrs[j]->atttypid);
+                    isnulls[j] = 0;
                     j++;
                 }
             }
+            Assert(j == natts);
+            out = HeapTupleGetDatum(heap_form_tuple(rettupledesc, outs, isnulls));
+            pfree(outs);
+            pfree(isnulls);
         }
-        else if (!retvoid) {
-            if (!plswipl_term_to_datum(a0 + nargs, rettype, &out))
-                ereport(ERROR,
-                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                         errmsg("PL/SWI-Prolog cannot convert output value to type %s",
-                                format_type_be(rettype))));
+        else { /* void function */
+            out = (Datum) 0;
         }
+
         if (funcctx)
             SRF_RETURN_NEXT(funcctx, out);
 
         return out;
     }
 
+    /* so, not ok! */
     check_exception(qid, "while callin PLSWIPL function");
     if (funcctx)
         SRF_RETURN_DONE(funcctx);
+
     ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
              errmsg("PL/SWI-Prolog function failed")));
 }
-
