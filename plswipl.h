@@ -14,6 +14,7 @@
 #include "utils/elog.h"
 #include "utils/syscache.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 
 #include <SWI-Prolog.h>
 

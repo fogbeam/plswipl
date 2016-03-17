@@ -174,8 +174,41 @@ plswipl_term_to_datum(term_t t, Oid type) {
         if (PL_get_chars(t, &v, (CVT_ALL|CVT_WRITE|BUF_RING|REP_UTF8) & ~CVT_LIST))
             return PointerGetDatum(DirectFunctionCall1(textin, PointerGetDatum(v)));
     }
-    }
+    case INT4ARRAYOID: {
+        size_t length;
+        if (PL_skip_list(t, 0, &length) == PL_LIST) {
+            ArrayBuildState *astate;
+            int ndims, i;
+            int dims[MAXDIM];
+            int lbs[MAXDIM];
+            Oid elemtype = get_element_type(type);
+            Assert(elemtype != 0);
+            astate = initArrayResult(elemtype, CurrentMemoryContext, true);
+            memset(dims, 0, sizeof(dims));
+            memset(lbs, 0, sizeof(lbs));
+            if (length == 0) {
+                ndims = 0;
+            }
+            else {
+                term_t h = PL_new_term_ref();
+                term_t l = PL_copy_term_ref(t);
 
+                for (i = 0; i < length; i++) {
+                    if (!PL_get_list(l, h, l))
+                        Assert(false);
+                    accumArrayResult(astate, plswipl_term_to_datum(h, elemtype), false, elemtype, CurrentMemoryContext);
+                }
+                ndims = 1;
+                dims[0] = length;
+                for (i = 0; i < ndims; i++) lbs[i] = 1;
+            }
+            return makeMdArrayResult(astate, ndims, dims, lbs,
+                                     CurrentMemoryContext, true);
+        }
+        break;
+    }
+    }
+    
     if (!PL_get_chars(t, &str, (CVT_ALL|CVT_VARIABLE|CVT_WRITEQ|BUF_RING|REP_UTF8) & ~CVT_LIST))
         str = "***unwritable***";
     elog(ERROR,

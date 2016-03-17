@@ -41,9 +41,15 @@ create function factors_bad(in n int) returns int[] as $$"/home/salva/g/pg/plswi
 
 select factors_bad(4328476);
 
+create function text2term(in n text) returns int[][] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
 
+select text2term('[[45,23], [12,34]]');
+
+drop function text2term(text);
 create function text2term(in n text) returns text as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
 
 select text2term('[foo(34/23), 12]');
+
+
 
 \set echo none
