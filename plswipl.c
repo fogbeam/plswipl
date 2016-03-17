@@ -171,12 +171,12 @@ plswipl_term_to_datum(term_t t, Oid type) {
     }
     case TEXTOID: {
         char *v;
-        if (PL_get_chars(t, &v, CVT_ALL|BUF_RING|REP_UTF8))
+        if (PL_get_chars(t, &v, (CVT_ALL|CVT_WRITE|BUF_RING|REP_UTF8) & ~CVT_LIST))
             return PointerGetDatum(DirectFunctionCall1(textin, PointerGetDatum(v)));
     }
     }
 
-    if (!PL_get_chars(t, &str, CVT_ALL|CVT_VARIABLE|CVT_WRITE|BUF_RING|REP_UTF8))
+    if (!PL_get_chars(t, &str, (CVT_ALL|CVT_VARIABLE|CVT_WRITEQ|BUF_RING|REP_UTF8) & ~CVT_LIST))
         str = "***unwritable***";
     elog(ERROR,
          "Cannot convert prolog term '%s' (%d) to PostgreSQL type %s (%d)",

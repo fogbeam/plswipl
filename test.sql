@@ -27,8 +27,23 @@ select break_pairs('hello world!');
 select * from break_pairs('hello world!') order by b offset 3 limit 2;
 select break_pairs('hello world!') offset 30 limit 1;
 
-select distinct bp.a, bp.b from pg_proc, lateral (select * from break_pairs(proname)) as bp order by bp.b;
+select count(*)
+  from ( select distinct bp.a, bp.b
+           from pg_proc,
+                lateral (select * from break_pairs(proname)) as bp
+           order by bp.b) as pairs;
+
+create function factors(in n int) returns int[] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+
+select factors(4328476);
+
+create function factors_bad(in n int) returns int[] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+
+select factors_bad(4328476);
 
 
+create function text2term(in n text) returns text as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+
+select text2term('[foo(34/23), 12]');
 
 \set echo none
