@@ -15,6 +15,7 @@
 #include "utils/syscache.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/array.h"
 
 #include <SWI-Prolog.h>
 

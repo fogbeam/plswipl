@@ -2,7 +2,7 @@ MODULE_big = plswipl
 EXTENSION = plswipl
 DOCS = README.plswipl
 OBJS = plswipl.o spi.o
-
+CFLAGS = "-O0 -g"
 plswipl_version = 0.1
 
 DATA = boot.prolog

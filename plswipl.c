@@ -143,8 +143,56 @@ utf_e2u(const char *str) {
 }
 
 static Datum
-plswipl_term_to_datum(term_t t, Oid type) {
+ebad_term_to_datum_conversion(term_t t, Oid type) {
     char *str;
+    if (!PL_get_chars(t, &str, (CVT_ALL|CVT_VARIABLE|CVT_WRITEQ|BUF_RING|REP_UTF8) & ~CVT_LIST))
+        str = "***unwritable***";
+    elog(ERROR,
+         "Cannot convert prolog term '%s' (%d) to PostgreSQL type %s (%d)",
+         str, PL_term_type(t), format_type_be(type), type);
+    return 0; /* unreachable */
+}
+
+static Datum plswipl_term_to_datum(term_t t, Oid type);
+static void plswipl_datum_to_term(Oid type, Datum datum, term_t t);
+
+static Datum
+plswipl_term_to_datum_array(term_t t, Oid type, Oid elemtype) {
+    size_t length;
+    if (PL_skip_list(t, 0, &length) == PL_LIST) {
+        ArrayBuildState *astate;
+        int ndims, i;
+        int dims[MAXDIM];
+        int lbs[MAXDIM];
+        Assert(elemtype != InvalidOid);
+        astate = initArrayResult(elemtype, CurrentMemoryContext, true);
+        memset(dims, 0, sizeof(dims));
+        memset(lbs, 0, sizeof(lbs));
+        if (length == 0) {
+            ndims = 0;
+        }
+        else {
+            term_t h = PL_new_term_ref();
+            term_t l = PL_copy_term_ref(t);
+            
+            for (i = 0; i < length; i++) {
+                if (!PL_get_list(l, h, l))
+                    Assert(false);
+                accumArrayResult(astate, plswipl_term_to_datum(h, elemtype), false, elemtype, CurrentMemoryContext);
+            }
+            ndims = 1;
+            dims[0] = length;
+            for (i = 0; i < ndims; i++) lbs[i] = 1;
+        }
+        return makeMdArrayResult(astate, ndims, dims, lbs,
+                                 CurrentMemoryContext, true);
+    }
+    
+    return ebad_term_to_datum_conversion(t, type);
+}
+
+static Datum
+plswipl_term_to_datum(term_t t, Oid type) {
     switch(type) {
     case BOOLOID: {
         int v;
@@ -152,6 +200,7 @@ plswipl_term_to_datum(term_t t, Oid type) {
             return BoolGetDatum(v);
         break;
     }
+    case OIDOID:
     case INT2OID:
     case INT4OID:
     case INT8OID: {
@@ -165,58 +214,138 @@ plswipl_term_to_datum(term_t t, Oid type) {
                 if (((uint64_t)v >> 32) == 0)
                     return Int32GetDatum(v);
             }
+            else if (type == OIDOID) {
+                if (((uint64_t)v >> 32) == 0)
+                    return ObjectIdGetDatum(v);
+            }
             else return Int64GetDatum(v);
         }
         break;
     }
+    case FLOAT4OID:
+    case FLOAT8OID: {
+        double v;
+        if (PL_get_float(t, &v)) {
+            if (type == FLOAT4OID)
+                return Float4GetDatum(v);
+            return Float8GetDatum(v);
+        }
+        break;
+    }
+        
     case TEXTOID: {
         char *v;
         if (PL_get_chars(t, &v, (CVT_ALL|CVT_WRITE|BUF_RING|REP_UTF8) & ~CVT_LIST))
             return PointerGetDatum(DirectFunctionCall1(textin, PointerGetDatum(v)));
     }
-    case INT4ARRAYOID: {
-        size_t length;
-        if (PL_skip_list(t, 0, &length) == PL_LIST) {
-            ArrayBuildState *astate;
-            int ndims, i;
-            int dims[MAXDIM];
-            int lbs[MAXDIM];
-            Oid elemtype = get_element_type(type);
-            Assert(elemtype != 0);
-            astate = initArrayResult(elemtype, CurrentMemoryContext, true);
-            memset(dims, 0, sizeof(dims));
-            memset(lbs, 0, sizeof(lbs));
-            if (length == 0) {
-                ndims = 0;
-            }
-            else {
-                term_t h = PL_new_term_ref();
-                term_t l = PL_copy_term_ref(t);
 
-                for (i = 0; i < length; i++) {
-                    if (!PL_get_list(l, h, l))
-                        Assert(false);
-                    accumArrayResult(astate, plswipl_term_to_datum(h, elemtype), false, elemtype, CurrentMemoryContext);
-                }
-                ndims = 1;
-                dims[0] = length;
-                for (i = 0; i < ndims; i++) lbs[i] = 1;
-            }
-            return makeMdArrayResult(astate, ndims, dims, lbs,
-                                     CurrentMemoryContext, true);
-        }
-        break;
+    default: {
+        Oid elemtype = get_element_type(type);
+        if (elemtype != InvalidOid)
+            return plswipl_term_to_datum_array(t, type, elemtype);
     }
     }
     
-    if (!PL_get_chars(t, &str, (CVT_ALL|CVT_VARIABLE|CVT_WRITEQ|BUF_RING|REP_UTF8) & ~CVT_LIST))
-        str = "***unwritable***";
-    elog(ERROR,
-         "Cannot convert prolog term '%s' (%d) to PostgreSQL type %s (%d)",
-         str, PL_term_type(t), format_type_be(type), type);
-
-    return 0; /* unreachable */
+    return ebad_term_to_datum_conversion(t, type);
 }
+
+static void
+plswipl_datum_array_to_term_dim(Oid elemtype, Datum **elems, int ndims, int *dims, term_t t) {
+    term_t a = PL_new_term_ref();
+    printf("elemtype: %d, elems: %p, ndims: %d, dims[0]: %d, t: %ld\n",
+           elemtype, elems, ndims, dims[0], t); fflush(stdout);
+    PL_put_nil(t);
+    if (ndims) {
+        int i;
+        for (i = 0; i < dims[0]; i++) {
+            if (ndims > 1) {
+                printf("recursing with ndims: %d\n", ndims - 1); fflush(stdout);
+                plswipl_datum_array_to_term_dim(elemtype, elems, ndims - 1, dims + 1, a);
+            }
+            else {
+                Datum elem = *(--*elems);
+                plswipl_datum_to_term(elemtype, elem, a);
+                /* PL_put_atom_chars(a, "foo"); */
+                /* PL_put_integer(a, 72); */
+            }
+            if (!PL_cons_list(t, a, t))
+                goto error;
+        }
+    }
+    {
+        char *str;
+        if (PL_get_chars(t, &str, (CVT_ALL|CVT_VARIABLE|CVT_WRITE|BUF_RING|REP_UTF8) & ~CVT_STRING))
+            printf("in prolog term %ld: %s\n", t, str); fflush(stdout);
+        return;
+    }
+        
+  error:
+    elog(ERROR, "unable to convert PostgreSQL array to Prolog list");
+}
+
+static void
+plswipl_datum_array_to_term(Oid type, Oid elemtype, Datum datum, term_t t) {
+    ArrayType *arrtype = DatumGetArrayTypeP(datum);
+    if (arrtype) {
+	int16 elemlen;
+        bool elembyval;
+        char elemalign;
+        Datum *elems, *tail;
+        int nelems;
+        int ndims = ARR_NDIM(arrtype);
+        int *dims = ARR_DIMS(arrtype);
+        Assert(elemtype == ARR_ELEMTYPE(arrtype));
+        get_typlenbyvalalign(elemtype, &elemlen, &elembyval, &elemalign);
+        deconstruct_array(arrtype, elemtype, elemlen, elembyval, elemalign,
+                          &elems, NULL, &nelems);
+        tail = elems + nelems;
+        printf("array arrtype: %p, elemtype: %d, elemlen: %d, elembyval: %d, elemalign: %d, elems: %p, nelems: %d, tail: %p\n",
+               arrtype, elemtype, elemlen, elembyval, elemalign, elems, nelems, tail); fflush(stdout);
+        plswipl_datum_array_to_term_dim(elemtype, &tail, ndims, dims, t);
+        return;
+    }
+    elog(ERROR, "Cannot retrieve ArrayType for type %s (%d)",
+         format_type_be(type), type);
+}
+
+static void
+plswipl_datum_to_term(Oid type, Datum datum, term_t a) {
+    printf("converting element of type %s (%d) to prolog\n", format_type_be(type), type); fflush(stdout);
+    switch(type) {
+    case BOOLOID:
+        if (PL_put_bool(a, DatumGetBool(datum))) return;
+        break;
+    case INT2OID:
+        if (PL_put_integer(a, DatumGetInt16(datum))) return;
+        break;
+    case INT4OID:
+        if (PL_put_integer(a, DatumGetInt32(datum))) return;
+        break;
+    case INT8OID:
+        if (PL_put_int64(a, DatumGetInt64(datum))) return;
+        break;
+    case FLOAT4OID:
+        if (PL_put_float(a, DatumGetFloat4(datum))) return;
+        break;
+    case FLOAT8OID:
+        if (PL_put_float(a, DatumGetFloat8(datum))) return;
+        break;
+    case TEXTOID:
+        if (PL_put_string_chars(a, utf_e2u(TextDatumGetCString(datum)))) return;
+        break;
+    default: {
+        Oid elemtype = get_element_type(type);
+        if (elemtype != InvalidOid) {
+            plswipl_datum_array_to_term(type, elemtype, datum, a);
+            return;
+        }
+    }
+    }
+
+    elog(ERROR, "PL/SWI-Prolog cannot convert PostgreSQL value of type %s (%d) to a Prolog term",
+         format_type_be(type), type);
+}
+
 
 static void
 plswipl_clean_context(plswipl_srfctx *srfctx) {
@@ -328,37 +457,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
                 if (fcinfo->argnull[j])
                     PL_put_nil(a);
                 else {
-                    Datum datum = fcinfo->arg[j];
-                    switch(argtypes[i]) {
-                    case BOOLOID:
-                        if (!PL_put_bool(a, DatumGetBool(datum))) goto error;
-                        break;
-                    case INT2OID:
-                        if (!PL_put_integer(a, DatumGetInt16(datum))) goto error;
-                        break;
-                    case INT4OID:
-                        if (!PL_put_integer(a, DatumGetInt32(datum))) goto error;
-                        break;
-                    case INT8OID:
-                        if (!PL_put_int64(a, DatumGetInt64(datum))) goto error;
-                        break;
-                    case FLOAT4OID:
-                        if (!PL_put_float(a, DatumGetFloat4(datum))) goto error;
-                        break;
-                    case FLOAT8OID:
-                        if (!PL_put_float(a, DatumGetFloat8(datum))) goto error;
-                        break;
-                    case TEXTOID:
-                        printf("converting Pg text '%s' to SWI-Prolog\n", TextDatumGetCString(datum)); fflush(stdout);
-                        if (!PL_put_string_chars(a, utf_e2u(TextDatumGetCString(datum)))) goto error;
-                        break;
-                    default:
-                    error:
-                        ereport(ERROR,
-                                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                                 errmsg("PL/SWI-Prolog functions cannot accept type %s",
-                                        format_type_be(argtypes[i]))));
-                    }
+                    plswipl_datum_to_term(argtypes[i], fcinfo->arg[j], a);
                     j++;
                 }
             case 'o':

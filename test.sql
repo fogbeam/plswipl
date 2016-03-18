@@ -34,22 +34,30 @@ select count(*)
            order by bp.b) as pairs;
 
 create function factors(in n int) returns int[] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
-
 select factors(4328476);
 
 create function factors_bad(in n int) returns int[] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
-
 select factors_bad(4328476);
 
 create function text2term(in n text) returns int[][] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
-
 select text2term('[[45,23], [12,34]]');
+select text2term('[45,23, 12,34]');
+
+drop function text2term(text);
+create function text2term(in n text) returns float8[][] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+select text2term('[[45,23], [12,34]]');
+select text2term('[45,23, 12,34]');
 
 drop function text2term(text);
 create function text2term(in n text) returns text as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
-
 select text2term('[foo(34/23), 12]');
 
+create function text_chars(in t text) returns text[] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+select text_chars('hello world!');
 
+create function ppipe(in a int[]) returns text as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+create table arrtable (a int[]);
+insert into arrtable values ('{1}'), ('{1, 2}'), ('{{1, 2}, {3, 4}}');
+select p from arrtable, lateral (select * from ppipe(arrtable.a)) as p;
 
 \set echo none

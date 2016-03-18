@@ -10,6 +10,9 @@ break_chars(String, Char) :-
         atom_chars(String, Chars),
         member(Char, Chars).
 
+text_chars(String, Chars) :-
+        atom_chars(String, Chars).
+
 prolog_length(X, L) :-
         atom_chars(X, A),
         length(A, L).
@@ -47,3 +50,5 @@ factors(I, N, F) :-
                     factors(I1, N, F1) )
             ;   N1 is N + 1,
                 factors(I, N1, F))).
+
+ppipe(A, A).
