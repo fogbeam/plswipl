@@ -60,4 +60,8 @@ create table arrtable (a int[]);
 insert into arrtable values ('{1}'), ('{1, 2}'), ('{{1, 2}, {3, 4}}');
 select p from arrtable, lateral (select * from ppipe(arrtable.a)) as p;
 
+drop function ppipe(int[]);
+create function ppipe(in a int[]) returns float4[] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+select p from arrtable, lateral (select * from ppipe(arrtable.a)) as p;
+
 \set echo none
