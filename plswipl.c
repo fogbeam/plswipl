@@ -250,7 +250,7 @@ plswipl_term_to_datum(term_t t, Oid type) {
 }
 
 static void
-plswipl_datum_array_to_term_dim(Oid elemtype, Datum **elems, int ndims, int *dims, term_t t) {
+plswipl_datum_array_to_term_recurse(Oid elemtype, Datum **elems, int ndims, int *dims, term_t t) {
     term_t a = PL_new_term_ref();
     printf("elemtype: %d, elems: %p, ndims: %d, dims[0]: %d, t: %ld\n",
            elemtype, elems, ndims, dims[0], t); fflush(stdout);
@@ -260,7 +260,7 @@ plswipl_datum_array_to_term_dim(Oid elemtype, Datum **elems, int ndims, int *dim
         for (i = 0; i < dims[0]; i++) {
             if (ndims > 1) {
                 printf("recursing with ndims: %d\n", ndims - 1); fflush(stdout);
-                plswipl_datum_array_to_term_dim(elemtype, elems, ndims - 1, dims + 1, a);
+                plswipl_datum_array_to_term_recurse(elemtype, elems, ndims - 1, dims + 1, a);
             }
             else {
                 Datum elem = *(--*elems);
@@ -301,7 +301,7 @@ plswipl_datum_array_to_term(Oid type, Oid elemtype, Datum datum, term_t t) {
         tail = elems + nelems;
         printf("array arrtype: %p, elemtype: %d, elemlen: %d, elembyval: %d, elemalign: %d, elems: %p, nelems: %d, tail: %p\n",
                arrtype, elemtype, elemlen, elembyval, elemalign, elems, nelems, tail); fflush(stdout);
-        plswipl_datum_array_to_term_dim(elemtype, &tail, ndims, dims, t);
+        plswipl_datum_array_to_term_recurse(elemtype, &tail, ndims, dims, t);
         return;
     }
     elog(ERROR, "Cannot retrieve ArrayType for type %s (%d)",
