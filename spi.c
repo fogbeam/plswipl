@@ -114,15 +114,53 @@ my_execute(term_t a0, int arity, void *context) {
 }
 
 static foreign_t
+my_get_values(term_t a0, int arity, void *context) {
+    SPITupleTable *tuptable = SPI_tuptable;
+    ssize_t j = SPI_processed;
+    term_t l1 = PL_new_term_refs(3);
+    PL_put_nil(l1);
+    if (tuptable != NULL) {
+        TupleDesc tupdesc = SPI_tuptable->tupdesc;
+        term_t l2 = l1 + 1;
+        term_t t = l1 + 2;
+        printf("converting resultset to prolog, rows: %ld, cols: %d\n",
+               j, tupdesc->natts); fflush(stdout);
+        while (j--) {
+            HeapTuple tuple = tuptable->vals[j];
+            ssize_t i = tupdesc->natts;
+            bool isnull;
+            PL_put_nil(l2);
+            printf("converting row %ld\n", j);
+            while (i--) {
+                printf("converting element at pos (%ld, %ld) of type %s (%d) to prolog term %ld\n",
+                       i, j, format_type_be(tupdesc->attrs[i]->atttypid),
+                       tupdesc->attrs[i]->atttypid, t); fflush(stdout);
+
+                plswipl_datum_to_term(tupdesc->attrs[i]->atttypid,
+                                      heap_getattr(tuple, i + 1, tupdesc, &isnull), t);
+                //PL_put_int64(t, i * j);
+                if (!PL_cons_list(l2, t, l2)) goto error;
+            }
+            if (!PL_cons_list(l1, l2, l1)) goto error;
+        }
+    }
+    return PL_unify(l1, a0);
+
+error:
+    elog(ERROR, "unable to construct resultset object");
+}
+
+static foreign_t
 my_processed(term_t a0, int arity, void *context) {
     assert(arity == 1);
     return PL_unify_int64(a0, SPI_processed);
 }
 
 PL_extension
-plswipl_spi_extension[] = { { "connect",   0, my_connect,   PL_FA_VARARGS },
-                            { "finish",    0, my_finish,    PL_FA_VARARGS },
-                            { "execute",   4, my_execute,   PL_FA_VARARGS },
-                            { "processed", 1, my_processed, PL_FA_VARARGS },
+plswipl_spi_extension[] = { { "connect",    0, my_connect,    PL_FA_VARARGS },
+                            { "finish",     0, my_finish,     PL_FA_VARARGS },
+                            { "execute",    4, my_execute,    PL_FA_VARARGS },
+                            { "processed",  1, my_processed,  PL_FA_VARARGS },
+                            { "get_values", 1, my_get_values, PL_FA_VARARGS },
                             { NULL,          0, NULL,       0 } };
 

@@ -153,9 +153,6 @@ ebad_term_to_datum_conversion(term_t t, Oid type) {
     return 0; /* unreachable */
 }
 
-static Datum plswipl_term_to_datum(term_t t, Oid type);
-static void plswipl_datum_to_term(Oid type, Datum datum, term_t t);
-
 static Datum
 plswipl_term_to_datum_array(term_t t, Oid type, Oid elemtype) {
     size_t length;
@@ -191,7 +188,7 @@ plswipl_term_to_datum_array(term_t t, Oid type, Oid elemtype) {
     return ebad_term_to_datum_conversion(t, type);
 }
 
-static Datum
+Datum
 plswipl_term_to_datum(term_t t, Oid type) {
     switch(type) {
     case BOOLOID: {
@@ -278,7 +275,7 @@ plswipl_datum_array_to_term_recurse(Oid elemtype, Datum **elems, int ndims, int 
             printf("in prolog term %ld: %s\n", t, str); fflush(stdout);
         return;
     }
-        
+
   error:
     elog(ERROR, "unable to convert PostgreSQL array to Prolog list");
 }
@@ -308,7 +305,7 @@ plswipl_datum_array_to_term(Oid type, Oid elemtype, Datum datum, term_t t) {
          format_type_be(type), type);
 }
 
-static void
+void
 plswipl_datum_to_term(Oid type, Datum datum, term_t a) {
     printf("converting element of type %s (%d) to prolog\n", format_type_be(type), type); fflush(stdout);
     switch(type) {

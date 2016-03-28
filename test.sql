@@ -64,4 +64,8 @@ drop function ppipe(int[]);
 create function ppipe(in a int[]) returns float4[] as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
 select p from arrtable, lateral (select * from ppipe(arrtable.a)) as p;
 
+create function prolog_spi_execute(in query text, out n int, out r text) returns setof record as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+
+create function prolog_spi_execute_and_result(in query text, out n int, out r text) returns record as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+
 \set echo none

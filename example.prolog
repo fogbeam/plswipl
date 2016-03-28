@@ -31,6 +31,14 @@ prolog_spi_execute(Text, N, R) :-
         spi:processed(N),
         spi:finish.
 
+prolog_spi_execute_and_result(Text, N, R) :-
+        spi:connect,
+        spi:execute(Text, false, 0, R),
+        spi:processed(N),
+        spi:get_values(V),
+        writeln(V),
+        spi:finish.
+
 factors_bad(_I, [foo(34/21)]).
 
 text2term(Text, Term) :-
