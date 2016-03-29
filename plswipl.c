@@ -247,7 +247,7 @@ plswipl_term_to_datum(term_t t, Oid type) {
 }
 
 static void
-plswipl_datum_array_to_term_recurse(Oid elemtype, Datum **elems, int ndims, int *dims, term_t t) {
+plswipl_datum_array_to_term_recurse(Oid elemtype, Datum **elems, bool **isnulls, int ndims, int *dims, term_t t) {
     term_t a = PL_new_term_ref();
     printf("elemtype: %d, elems: %p, ndims: %d, dims[0]: %d, t: %ld\n",
            elemtype, elems, ndims, dims[0], t); fflush(stdout);
@@ -257,11 +257,12 @@ plswipl_datum_array_to_term_recurse(Oid elemtype, Datum **elems, int ndims, int 
         for (i = 0; i < dims[0]; i++) {
             if (ndims > 1) {
                 printf("recursing with ndims: %d\n", ndims - 1); fflush(stdout);
-                plswipl_datum_array_to_term_recurse(elemtype, elems, ndims - 1, dims + 1, a);
+                plswipl_datum_array_to_term_recurse(elemtype, elems, isnulls, ndims - 1, dims + 1, a);
             }
             else {
                 Datum elem = *(--*elems);
-                plswipl_datum_to_term(elemtype, elem, a);
+                bool isnull = *(--*isnulls);
+                plswipl_datum_to_term(elemtype, elem, isnull, a);
                 /* PL_put_atom_chars(a, "foo"); */
                 /* PL_put_integer(a, 72); */
             }
@@ -281,24 +282,28 @@ plswipl_datum_array_to_term_recurse(Oid elemtype, Datum **elems, int ndims, int 
 }
 
 static void
-plswipl_datum_array_to_term(Oid type, Oid elemtype, Datum datum, term_t t) {
+plswipl_datum_array_to_term(Oid type, Datum datum, term_t t) {
     ArrayType *arrtype = DatumGetArrayTypeP(datum);
+    printf("arrtype: %p\n", arrtype); fflush(stdout);
+    
     if (arrtype) {
 	int16 elemlen;
         bool elembyval;
         char elemalign;
         Datum *elems, *tail;
+        bool *isnull, *isnulltail;
         int nelems;
         int ndims = ARR_NDIM(arrtype);
         int *dims = ARR_DIMS(arrtype);
-        Assert(elemtype == ARR_ELEMTYPE(arrtype));
+        Oid elemtype = ARR_ELEMTYPE(arrtype);
         get_typlenbyvalalign(elemtype, &elemlen, &elembyval, &elemalign);
         deconstruct_array(arrtype, elemtype, elemlen, elembyval, elemalign,
-                          &elems, NULL, &nelems);
+                          &elems, &isnull, &nelems);
         tail = elems + nelems;
+        isnulltail = isnull + nelems;
         printf("array arrtype: %p, elemtype: %d, elemlen: %d, elembyval: %d, elemalign: %d, elems: %p, nelems: %d, tail: %p\n",
                arrtype, elemtype, elemlen, elembyval, elemalign, elems, nelems, tail); fflush(stdout);
-        plswipl_datum_array_to_term_recurse(elemtype, &tail, ndims, dims, t);
+        plswipl_datum_array_to_term_recurse(elemtype, &tail, &isnulltail, ndims, dims, t);
         return;
     }
     elog(ERROR, "Cannot retrieve ArrayType for type %s (%d)",
@@ -306,8 +311,14 @@ plswipl_datum_array_to_term(Oid type, Oid elemtype, Datum datum, term_t t) {
 }
 
 void
-plswipl_datum_to_term(Oid type, Datum datum, term_t a) {
+plswipl_datum_to_term(Oid type, Datum datum, bool isnull, term_t a) {
     printf("converting element of type %s (%d) to prolog\n", format_type_be(type), type); fflush(stdout);
+
+    if (isnull) {
+        PL_put_nil(a);
+        return;
+    }
+    
     switch(type) {
     case BOOLOID:
         if (PL_put_bool(a, DatumGetBool(datum))) return;
@@ -327,14 +338,29 @@ plswipl_datum_to_term(Oid type, Datum datum, term_t a) {
     case FLOAT8OID:
         if (PL_put_float(a, DatumGetFloat8(datum))) return;
         break;
-    case TEXTOID:
+        /*
+    case TEXTOID: {
         if (PL_put_string_chars(a, utf_e2u(TextDatumGetCString(datum)))) return;
         break;
+        */
     default: {
-        Oid elemtype = get_element_type(type);
-        if (elemtype != InvalidOid) {
-            plswipl_datum_array_to_term(type, elemtype, datum, a);
+        if (OidIsValid(get_base_element_type(type))) {
+            plswipl_datum_array_to_term(type, datum, a);
             return;
+        } 
+        else {
+            char *outputstr, *outputstr_u8;
+            bool typisvarlena;
+            Oid typoutput;
+            getTypeOutputInfo(type, &typoutput, &typisvarlena);
+            printf("type: %d, typoutput: %d, typosvarlena: %d\n",
+                    type, typoutput, typisvarlena); fflush(stdout);
+            outputstr = OidOutputFunctionCall(typoutput, datum);
+            outputstr_u8 = utf_e2u(outputstr);
+            if (PL_put_string_chars(a, outputstr_u8)) {
+                pfree(outputstr);
+                return;
+            }
         }
     }
     }
@@ -454,7 +480,7 @@ plswipl_function(PG_FUNCTION_ARGS) {
                 if (fcinfo->argnull[j])
                     PL_put_nil(a);
                 else {
-                    plswipl_datum_to_term(argtypes[i], fcinfo->arg[j], a);
+                    plswipl_datum_to_term(argtypes[i], fcinfo->arg[j], fcinfo->argnull[j], a);
                     j++;
                 }
             case 'o':

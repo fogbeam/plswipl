@@ -24,4 +24,4 @@
 extern PL_extension plswipl_spi_extension[];
 
 Datum plswipl_term_to_datum(term_t t, Oid type);
-void plswipl_datum_to_term(Oid type, Datum datum, term_t t);
+void plswipl_datum_to_term(Oid type, Datum datum, bool isnull, term_t t);
