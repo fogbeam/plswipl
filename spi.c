@@ -127,20 +127,7 @@ my_get_values(term_t a0, int arity, void *context) {
                j, tupdesc->natts); fflush(stdout);
         while (j--) {
             HeapTuple tuple = tuptable->vals[j];
-            ssize_t i = tupdesc->natts;
-            PL_put_nil(l2);
-            printf("converting row %ld\n", j);
-            while (i--) {
-                Datum datum;
-                bool isnull;
-                printf("converting element at pos (%ld, %ld) of type %s (%d) to prolog term %ld\n",
-                       i, j, format_type_be(tupdesc->attrs[i]->atttypid),
-                       tupdesc->attrs[i]->atttypid, t); fflush(stdout);
-                datum = heap_getattr(tuple, i + 1, tupdesc, &isnull);
-                plswipl_datum_to_term(tupdesc->attrs[i]->atttypid,
-                                      datum, isnull, t);
-                if (!PL_cons_list(l2, t, l2)) goto error;
-            }
+            plswipl_tuple_to_term(tupdesc, tuple, l2);
             if (!PL_cons_list(l1, l2, l1)) goto error;
         }
     }

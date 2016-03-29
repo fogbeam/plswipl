@@ -30,6 +30,9 @@ typedef struct {
 
 static char *plswipl_argv[] = { "pl/swipl", "-p", "", "-f", "", NULL, };
 
+static atom_t atom_tuple;
+static functor_t functor_colon_2;
+
 void
 _PG_init(void) {
     static bool inited = false;
@@ -60,6 +63,9 @@ _PG_init(void) {
             elog(ERROR, "PL_initialise failed");
         }
 
+        atom_tuple = PL_new_atom("tuple");
+        functor_colon_2 = PL_new_functor(PL_new_atom(":"), 2);
+        
         PL_register_extensions_in_module("spi", plswipl_spi_extension);
 
         inited = 1;
@@ -311,6 +317,60 @@ plswipl_datum_array_to_term(Oid type, Datum datum, term_t t) {
 }
 
 void
+plswipl_tuple_to_term(TupleDesc tupdesc, HeapTupleData *tuple, term_t t) {
+    /*
+    term_t a = PL_new_term_ref();
+    ssize_t i, arity = tupdesc->natts;
+    if (!PL_put_functor(t, PL_new_functor(atom_tuple, arity)))
+        elog(ERROR, "PL_put_functor failed");
+    for (i = 1; i <= arity; i++) {
+        Datum datum;
+        bool isnull;
+        datum = heap_getattr(tuple, i, tupdesc, &isnull);
+        plswipl_datum_to_term(tupdesc->attrs[i - 1]->atttypid,
+                              datum, isnull, a);
+        if (!PL_unify_arg(i, t, a))
+            elog(ERROR, "PL_unify_arg failed");
+    }
+    */
+    term_t a0 = PL_new_term_refs(2);
+    term_t c = PL_new_term_ref();
+    ssize_t i = tupdesc->natts;
+    PL_put_nil(t);
+    while (i--) {
+        Datum datum;
+        bool isnull;
+
+        printf("converting element at pos (%ld) of type %s (%d) to prolog term\n",
+               i, format_type_be(tupdesc->attrs[i]->atttypid),
+               tupdesc->attrs[i]->atttypid); fflush(stdout);
+        PL_put_atom_chars(a0, NameStr(tupdesc->attrs[i]->attname));
+        datum = heap_getattr(tuple, i + 1, tupdesc, &isnull);
+        plswipl_datum_to_term(tupdesc->attrs[i]->atttypid,
+                              datum, isnull, a0 + 1);
+        if (!PL_cons_functor_v(c, functor_colon_2, a0) ||
+            !PL_cons_list(t, c, t))
+            elog(ERROR, "unable to build Prolog term");
+    }
+
+}
+
+static void
+plswipl_datum_row_to_term(Oid type, Datum datum, term_t a) {
+    HeapTupleHeader td = DatumGetHeapTupleHeader(datum);
+    Oid tupType = HeapTupleHeaderGetTypeId(td);
+    int32 tupTypmod = HeapTupleHeaderGetTypMod(td);
+    TupleDesc tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+
+    HeapTupleData tmptup;
+    tmptup.t_len = HeapTupleHeaderGetDatumLength(td);
+    tmptup.t_data = td;
+
+    plswipl_tuple_to_term(tupdesc, &tmptup, a);
+    ReleaseTupleDesc(tupdesc);
+}
+
+void
 plswipl_datum_to_term(Oid type, Datum datum, bool isnull, term_t a) {
     printf("converting element of type %s (%d) to prolog\n", format_type_be(type), type); fflush(stdout);
 
@@ -343,11 +403,15 @@ plswipl_datum_to_term(Oid type, Datum datum, bool isnull, term_t a) {
         if (PL_put_string_chars(a, utf_e2u(TextDatumGetCString(datum)))) return;
         break;
         */
-    default: {
-        if (OidIsValid(get_base_element_type(type))) {
+    default:
+        if (type_is_rowtype(type)) {
+            plswipl_datum_row_to_term(type, datum, a);
+            return;
+        }
+        else if (OidIsValid(get_base_element_type(type))) {
             plswipl_datum_array_to_term(type, datum, a);
             return;
-        } 
+        }
         else {
             char *outputstr, *outputstr_u8;
             bool typisvarlena;
@@ -362,7 +426,6 @@ plswipl_datum_to_term(Oid type, Datum datum, bool isnull, term_t a) {
                 return;
             }
         }
-    }
     }
 
     elog(ERROR, "PL/SWI-Prolog cannot convert PostgreSQL value of type %s (%d) to a Prolog term",
