@@ -31,6 +31,7 @@ typedef struct {
 static char *plswipl_argv[] = { "pl/swipl", "-p", "", "-f", "", NULL, };
 
 static atom_t atom_tuple;
+static atom_t atom_head;
 static functor_t functor_colon_2;
 
 void
@@ -64,6 +65,7 @@ _PG_init(void) {
         }
 
         atom_tuple = PL_new_atom("tuple");
+        atom_head  = PL_new_atom("head");
         functor_colon_2 = PL_new_functor(PL_new_atom(":"), 2);
         
         PL_register_extensions_in_module("spi", plswipl_spi_extension);
@@ -316,9 +318,30 @@ plswipl_datum_array_to_term(Oid type, Datum datum, term_t t) {
          format_type_be(type), type);
 }
 
+static void
+plswipl_tuplenames_to_term_as_functor(TupleDesc tupdesc, term_t t) {
+    ssize_t natts = tupdesc->natts;
+    term_t a = PL_new_term_ref();
+    ssize_t i;
+
+    if (!PL_put_functor(t, PL_new_functor(atom_head, natts)))
+        elog(ERROR, "PL_put_functor failed");
+
+    for (i = 1; i <= natts; i++) {
+        PL_put_atom_chars(a, NameStr(tupdesc->attrs[i - 1]->attname));
+        if (!PL_unify_arg(i, t, a))
+            elog(ERROR, "PL_unify_arg failed 2");
+    }
+}
+
 void
-plswipl_tuple_to_term(TupleDesc tupdesc, HeapTupleData *tuple, term_t t) {
-    /*
+plswipl_tuplename_to_term(TupleDesc tupdesc, term_t t) {
+    plswipl_tuplenames_to_term_as_functor(tupdesc, t);
+}
+
+
+static void
+plswipl_tuple_to_term_as_functor(TupleDesc tupdesc, HeapTupleData *tuple, term_t t) {
     term_t a = PL_new_term_ref();
     ssize_t i, arity = tupdesc->natts;
     if (!PL_put_functor(t, PL_new_functor(atom_tuple, arity)))
@@ -332,7 +355,10 @@ plswipl_tuple_to_term(TupleDesc tupdesc, HeapTupleData *tuple, term_t t) {
         if (!PL_unify_arg(i, t, a))
             elog(ERROR, "PL_unify_arg failed");
     }
-    */
+}
+
+static void
+plswipl_tuple_to_term_as_list(TupleDesc tupdesc, HeapTupleData *tuple, term_t t) {
     term_t a0 = PL_new_term_refs(2);
     term_t c = PL_new_term_ref();
     ssize_t i = tupdesc->natts;
@@ -353,6 +379,14 @@ plswipl_tuple_to_term(TupleDesc tupdesc, HeapTupleData *tuple, term_t t) {
             elog(ERROR, "unable to build Prolog term");
     }
 
+}
+
+void
+plswipl_tuple_to_term(TupleDesc tupdesc, HeapTupleData *tuple, term_t t) {
+    if (1)
+        plswipl_tuple_to_term_as_functor(tupdesc, tuple, t);
+    else
+        plswipl_tuple_to_term_as_list(tupdesc, tuple, t);
 }
 
 static void

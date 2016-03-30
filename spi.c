@@ -114,15 +114,14 @@ my_execute(term_t a0, int arity, void *context) {
 }
 
 static foreign_t
-my_get_values(term_t a0, int arity, void *context) {
+my_get_tuples(term_t a0, int arity, void *context) {
     SPITupleTable *tuptable = SPI_tuptable;
     ssize_t j = SPI_processed;
-    term_t l1 = PL_new_term_refs(3);
+    term_t l1 = PL_new_term_ref();
     PL_put_nil(l1);
     if (tuptable != NULL) {
-        TupleDesc tupdesc = SPI_tuptable->tupdesc;
-        term_t l2 = l1 + 1;
-        term_t t = l1 + 2;
+        term_t l2 = PL_new_term_ref();
+        TupleDesc tupdesc = tuptable->tupdesc;
         printf("converting resultset to prolog, rows: %ld, cols: %d\n",
                j, tupdesc->natts); fflush(stdout);
         while (j--) {
@@ -138,6 +137,13 @@ error:
 }
 
 static foreign_t
+my_get_head(term_t a0, int arity, void *context) {
+    term_t t = PL_new_term_ref();
+    plswipl_tuplename_to_term(SPI_tuptable->tupdesc, t);
+    return PL_unify(a0, t);
+}
+
+static foreign_t
 my_processed(term_t a0, int arity, void *context) {
     assert(arity == 1);
     return PL_unify_int64(a0, SPI_processed);
@@ -148,6 +154,7 @@ plswipl_spi_extension[] = { { "connect",    0, my_connect,    PL_FA_VARARGS },
                             { "finish",     0, my_finish,     PL_FA_VARARGS },
                             { "execute",    4, my_execute,    PL_FA_VARARGS },
                             { "processed",  1, my_processed,  PL_FA_VARARGS },
-                            { "get_values", 1, my_get_values, PL_FA_VARARGS },
+                            { "get_tuples", 1, my_get_tuples, PL_FA_VARARGS },
+                            { "get_head",   1, my_get_head,   PL_FA_VARARGS },
                             { NULL,          0, NULL,       0 } };
 
