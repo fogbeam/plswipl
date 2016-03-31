@@ -68,4 +68,7 @@ create function prolog_spi_execute(in query text, out n int, out r text) returns
 
 create function prolog_spi_execute_and_result(in query text, out n int, out r text) returns record as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
 
+create function prolog_spi_prepare(in query text, in types text[]) returns void as $$"/home/salva/g/pg/plswipl/example.prolog"$$ language plswipl;
+
+
 \set echo none

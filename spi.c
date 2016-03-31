@@ -149,6 +149,45 @@ my_processed(term_t a0, int arity, void *context) {
     return PL_unify_int64(a0, SPI_processed);
 }
 
+static void
+dump_list(term_t l) {
+    term_t a = PL_new_term_ref();
+    char *head;
+    while(PL_get_list(l, a, l)) {
+        PL_get_chars_ex(a, &head, CVT_ALL|CVT_EXCEPTION|BUF_RING|REP_UTF8);
+        printf(">%s<", head); fflush(stdout);
+    }
+    if (PL_get_nil(l)) 
+        printf("nil!\n");
+    else {
+        PL_get_chars_ex(l, &head, CVT_ALL|CVT_EXCEPTION|BUF_RING|REP_UTF8);
+        printf("no nil: >%s<\n");
+    }
+        fflush(stdout);
+}
+
+static foreign_t
+my_prepare(term_t a0, int arity, void *context) {
+    /* spi:prepare(+Query, +Types, -Plan) */
+    char *query;
+    Oid *oids;
+    size_t length, i;
+    SPIPlanPtr plan;
+    term_t out;
+    PL_get_chars_ex(a0, &query, CVT_ALL|CVT_EXCEPTION|BUF_RING|REP_UTF8);
+    query = pstrdup(query);
+    dump_list(a0 + 1);
+    if (PL_skip_list(a0 + 1, 0, &length) != PL_LIST)
+        elog(ERROR, "argument is not a proper list (%d)", PL_skip_list(a0 + 1, 0, &length));
+    oids = palloc(sizeof(Oid) * length);
+    for (i = 0; i < length; i++)
+        oids[i] = TEXTOID;
+    plan = SPI_prepare(query, length, oids);
+    out = PL_new_term_ref();
+    plswipl_plan_to_term(plan, out);
+    return PL_unify(a0 + 2, out);
+}
+
 PL_extension
 plswipl_spi_extension[] = { { "connect",    0, my_connect,    PL_FA_VARARGS },
                             { "finish",     0, my_finish,     PL_FA_VARARGS },
@@ -156,5 +195,6 @@ plswipl_spi_extension[] = { { "connect",    0, my_connect,    PL_FA_VARARGS },
                             { "processed",  1, my_processed,  PL_FA_VARARGS },
                             { "get_tuples", 1, my_get_tuples, PL_FA_VARARGS },
                             { "get_head",   1, my_get_head,   PL_FA_VARARGS },
+                            { "prepare",    3, my_prepare,    PL_FA_VARARGS },
                             { NULL,          0, NULL,       0 } };
 

@@ -42,6 +42,14 @@ prolog_spi_execute_and_result(Text, N, R) :-
 
 factors_bad(_I, [foo(34/21)]).
 
+prolog_spi_prepare(Plan, Types) :-
+        spi:connect,
+        print(types(Types)),
+        writeln('-'),
+        spi:prepare(Plan, Type, Plan),
+        writeln(Plan),
+        spi:finish.
+
 text2term(Text, Term) :-
         read_term_from_atom(Text, Term, []).
 

@@ -33,6 +33,7 @@ static char *plswipl_argv[] = { "pl/swipl", "-p", "", "-f", "", NULL, };
 static atom_t atom_tuple;
 static atom_t atom_head;
 static functor_t functor_colon_2;
+static functor_t functor_dollar_plan_1;
 
 void
 _PG_init(void) {
@@ -67,7 +68,7 @@ _PG_init(void) {
         atom_tuple = PL_new_atom("tuple");
         atom_head  = PL_new_atom("head");
         functor_colon_2 = PL_new_functor(PL_new_atom(":"), 2);
-        
+        functor_dollar_plan_1 = PL_new_functor(PL_new_atom("$plan"), 1);
         PL_register_extensions_in_module("spi", plswipl_spi_extension);
 
         inited = 1;
@@ -161,6 +162,19 @@ ebad_term_to_datum_conversion(term_t t, Oid type) {
     return 0; /* unreachable */
 }
 
+static void
+plswipl_ptr_to_term(void *ptr, functor_t f, term_t t) {
+    term_t a0 = PL_new_term_refs(1);
+    if (PL_put_pointer(a0, ptr) &&
+        PL_cons_functor_v(t, f, a0)) return;
+    elog(ERROR, "unable to wrap pointer");
+}
+
+void
+plswipl_plan_to_term(SPIPlanPtr plan, term_t t) {
+    return plswipl_ptr_to_term(plan, functor_dollar_plan_1, t);
+}
+
 static Datum
 plswipl_term_to_datum_array(term_t t, Oid type, Oid elemtype) {
     size_t length;
@@ -179,7 +193,7 @@ plswipl_term_to_datum_array(term_t t, Oid type, Oid elemtype) {
         else {
             term_t h = PL_new_term_ref();
             term_t l = PL_copy_term_ref(t);
-            
+
             for (i = 0; i < length; i++) {
                 if (!PL_get_list(l, h, l))
                     Assert(false);
@@ -192,7 +206,7 @@ plswipl_term_to_datum_array(term_t t, Oid type, Oid elemtype) {
         return makeMdArrayResult(astate, ndims, dims, lbs,
                                  CurrentMemoryContext, true);
     }
-    
+
     return ebad_term_to_datum_conversion(t, type);
 }
 
@@ -288,6 +302,7 @@ plswipl_datum_array_to_term_recurse(Oid elemtype, Datum **elems, bool **isnulls,
   error:
     elog(ERROR, "unable to convert PostgreSQL array to Prolog list");
 }
+
 
 static void
 plswipl_datum_array_to_term(Oid type, Datum datum, term_t t) {
